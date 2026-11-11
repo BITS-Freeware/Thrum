@@ -74,7 +74,7 @@ Layout: a Cargo workspace with `crates/core`, `crates/server` and `crates/cli`, 
 ## M5: Attachments
 
 - Files are encrypted on the client with a per-file key, which is sent inside the MLS message. The server stores only the encrypted blob.
-- A size limit, local disk storage on the server, and an interface for S3-compatible storage later.
+- A size limit, local disk storage on the server, and an S3-compatible storage backend. Object storage with free egress (such as Cloudflare R2) is the recommended production choice, since media bandwidth is the largest running cost.
 - Expiry for blobs nobody can still fetch.
 
 **Done when:** a test sends an image between two CLI clients, the server holds only ciphertext, and an oversized upload is refused.
