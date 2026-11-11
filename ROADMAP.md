@@ -6,7 +6,7 @@ Work runs milestone by milestone, in order. Each milestone ends with its checks 
 
 ## Not in Scope
 
-These stay out of the project, now and later: cryptocurrency, wallets or payments, mini-apps or a bot platform, ads, paid tiers, stories, and public channels. Phone numbers are never required.
+These stay out of the project, now and later: cryptocurrency, wallets or in-chat payments, mini-apps or a bot platform, ads, paid tiers or paid features, stories, and public channels. (An optional supporter contribution that unlocks nothing is fine, but it is not part of 0.1.0.) Phone numbers are never required.
 
 Later, after 0.1.0, and not before: native mobile and desktop apps, push notifications, voice and video calls, and federation between servers.
 
@@ -76,8 +76,9 @@ Layout: a Cargo workspace with `crates/core`, `crates/server` and `crates/cli`, 
 - Files are encrypted on the client with a per-file key, which is sent inside the MLS message. The server stores only the encrypted blob.
 - A size limit, local disk storage on the server, and an S3-compatible storage backend. Object storage with free egress (such as Cloudflare R2) is the recommended production choice, since media bandwidth is the largest running cost.
 - Expiry for blobs nobody can still fetch.
+- Keep the service chat-first: images are resized and recompressed on the client before upload, and the server enforces a per-user daily upload quota. Both limits, the size cap, and how long attachments are kept are settings each server operator can change.
 
-**Done when:** a test sends an image between two CLI clients, the server holds only ciphertext, and an oversized upload is refused.
+**Done when:** a test sends an image between two CLI clients, the server holds only ciphertext, and both an oversized upload and an upload over the daily quota are refused.
 
 ## M6: Web Client
 
