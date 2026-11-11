@@ -1,0 +1,15 @@
+[package]
+name = "geist3-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Geist3 command line client"
+
+[[bin]]
+name = "geist3"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+url.workspace = true

@@ -1,0 +1,18 @@
+[package]
+name = "geist3-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Geist3 server: accounts, conversation membership and encrypted message relay"
+
+[[bin]]
+name = "geist3-server"
+path = "src/main.rs"
+
+[dependencies]
+axum.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tower.workspace = true
