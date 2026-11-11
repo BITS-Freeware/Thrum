@@ -1,0 +1,9 @@
+[package]
+name = "thrum-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Thrum core: protocol types and client logic shared by all clients"
+
+[dependencies]

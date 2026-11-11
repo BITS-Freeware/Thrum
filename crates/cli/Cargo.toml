@@ -1,0 +1,15 @@
+[package]
+name = "thrum-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Thrum command line client"
+
+[[bin]]
+name = "thrum"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+url.workspace = true
