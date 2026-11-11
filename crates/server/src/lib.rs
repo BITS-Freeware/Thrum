@@ -1,12 +1,18 @@
-//! Thrum server: accounts, conversation membership and encrypted message relay.
+//! Thrum server: accounts, device registry, key packages, message relay.
 
-use axum::{Router, routing::get};
+pub mod accounts;
+pub mod auth;
+pub mod config;
+pub mod db;
+pub mod error;
+pub mod ratelimit;
+pub mod routes;
+pub mod state;
 
-/// Build the application router.
-pub fn build_router() -> Router {
-    Router::new().route("/healthz", get(healthz))
-}
+use axum::Router;
+use state::AppState;
 
-async fn healthz() -> &'static str {
-    "ok"
+/// Build the application router for `state`.
+pub fn build_router(state: AppState) -> Router {
+    routes::routes(state)
 }
