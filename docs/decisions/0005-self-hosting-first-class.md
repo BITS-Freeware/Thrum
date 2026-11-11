@@ -1,4 +1,4 @@
-# 0004: Self-Hosting Is First-Class
+# 0005: Self-Hosting Is First-Class
 
 Status: accepted
 
