@@ -68,6 +68,14 @@ impl TestApp {
         }
         request.send().await.expect("request")
     }
+
+    pub async fn patch(&self, path: &str, token: Option<&str>, body: &Value) -> reqwest::Response {
+        let mut request = self.client.patch(self.url(path));
+        if let Some(token) = token {
+            request = request.bearer_auth(token);
+        }
+        request.json(body).send().await.expect("request")
+    }
 }
 
 /// Register a user; the test fails if the server does not answer 201.

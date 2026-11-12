@@ -8,21 +8,26 @@ use crate::accounts::now;
 use crate::error::ApiError;
 use crate::frames::encode_payload;
 
-/// Create a conversation with `creator_id` and every listed member user id.
-/// Returns the conversation id.
+/// Create a conversation with `creator_id` (its admin) and every listed
+/// member user id. Returns the conversation id.
 pub async fn create_conversation(
     db: &SqlitePool,
     creator_id: i64,
     member_ids: &[i64],
+    name: &str,
 ) -> Result<String, sqlx::Error> {
     let conversation_id = Uuid::new_v4().to_string();
     let started_at = now();
     let mut tx = db.begin().await?;
-    sqlx::query("INSERT INTO conversations (id, created_at) VALUES (?1, ?2)")
-        .bind(&conversation_id)
-        .bind(started_at)
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query(
+        "INSERT INTO conversations (id, created_at, name, owner_user_id) VALUES (?1, ?2, ?3, ?4)",
+    )
+    .bind(&conversation_id)
+    .bind(started_at)
+    .bind(name)
+    .bind(creator_id)
+    .execute(&mut *tx)
+    .await?;
     for user_id in std::iter::once(creator_id).chain(member_ids.iter().copied()) {
         sqlx::query("INSERT OR IGNORE INTO conversation_members (conversation_id, user_id, joined_at) VALUES (?1, ?2, ?3)")
             .bind(&conversation_id)

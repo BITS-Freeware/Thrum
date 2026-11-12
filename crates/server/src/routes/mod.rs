@@ -1,14 +1,16 @@
 //! HTTP routes.
 
 pub mod accounts;
+pub mod blocks;
 pub mod conversations;
 pub mod devices;
+pub mod invites;
 pub mod keypackages;
 pub mod members;
 pub mod ws;
 
 use axum::Router;
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, patch, post};
 
 use crate::state::AppState;
 
@@ -47,6 +49,21 @@ pub fn routes(state: AppState) -> Router {
             "/v1/conversations/{conversation_id}/messages",
             post(conversations::send_message),
         )
+        .route(
+            "/v1/conversations/{conversation_id}/name",
+            patch(conversations::rename),
+        )
+        .route(
+            "/v1/conversations/{conversation_id}/invites",
+            post(invites::create),
+        )
+        .route(
+            "/v1/conversations/{conversation_id}/invites/{token}",
+            delete(invites::revoke),
+        )
+        .route("/v1/invites/redeem", post(invites::redeem))
+        .route("/v1/blocks", post(blocks::block))
+        .route("/v1/blocks/{username}", delete(blocks::unblock))
         .route("/v1/ws", get(ws::ws_handler))
         .with_state(state)
 }

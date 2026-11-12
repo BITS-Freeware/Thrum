@@ -1,4 +1,4 @@
-//! Conversation endpoints.
+//! Conversation endpoints: create, list, rename, send.
 
 use axum::Json;
 use axum::body::Bytes;
@@ -17,51 +17,83 @@ use crate::frames::encode_payload;
 use crate::messages;
 use crate::state::AppState;
 
+/// Longest group name a server accepts.
+pub const MAX_NAME_BYTES: usize = 256;
+
 #[derive(Debug, Deserialize)]
 pub struct CreateConversationBody {
     /// Usernames to include besides the caller.
     pub members: Vec<String>,
+    /// Optional group name, visible to the server as routing metadata.
+    #[serde(default)]
+    pub name: String,
 }
 
 #[derive(Debug, Serialize)]
 pub struct ConversationInfo {
     pub id: String,
+    pub name: String,
+    /// Username of the conversation admin (the creator).
+    pub admin: String,
     pub members: Vec<String>,
 }
 
-/// `POST /v1/conversations`: create a conversation with the caller and the
-/// listed members. All members must have accounts.
+/// `POST /v1/conversations`: create a conversation with the caller as its
+/// admin and the listed members. Blocked relationships refuse the creation.
 pub async fn create(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(body): Json<CreateConversationBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     let authed = auth::authenticate(&state, &headers).await?;
+    let name = validate_name(&body.name)?;
     let mut member_ids = Vec::new();
     for raw in &body.members {
-        let name = UserName::new(raw).map_err(|_| ApiError::bad_request("invalid_username"))?;
+        let name_part =
+            UserName::new(raw).map_err(|_| ApiError::bad_request("invalid_username"))?;
         let id = sqlx::query_as::<_, (i64,)>("SELECT id FROM users WHERE username = ?1")
-            .bind(name.as_str())
+            .bind(name_part.as_str())
             .fetch_optional(&state.db)
             .await?
             .map(|(id,)| id)
             .ok_or_else(|| ApiError::bad_request("unknown_member"))?;
         if id != authed.user_id {
+            blocked_between(&state, authed.user_id, id).await?;
             member_ids.push(id);
         }
     }
     member_ids.sort_unstable();
     member_ids.dedup();
     let conversation_id =
-        messages::create_conversation(&state.db, authed.user_id, &member_ids).await?;
-    let members = conversation_members(&state.db, &conversation_id).await?;
+        messages::create_conversation(&state.db, authed.user_id, &member_ids, &name).await?;
     Ok((
         StatusCode::CREATED,
-        Json(ConversationInfo {
-            id: conversation_id,
-            members,
-        }),
+        Json(conversation_info(&state, &conversation_id).await?),
     ))
+}
+
+/// `PATCH /v1/conversations/{conversation_id}/name`: rename the group.
+/// Admin only.
+pub async fn rename(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(conversation_id): Path<String>,
+    Json(body): Json<RenameBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let authed = auth::authenticate(&state, &headers).await?;
+    let name = validate_name(&body.name)?;
+    require_admin(&state, &conversation_id, authed.user_id).await?;
+    sqlx::query("UPDATE conversations SET name = ?1 WHERE id = ?2")
+        .bind(&name)
+        .bind(&conversation_id)
+        .execute(&state.db)
+        .await?;
+    Ok(Json(conversation_info(&state, &conversation_id).await?))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RenameBody {
+    pub name: String,
 }
 
 /// `GET /v1/conversations`: the caller's conversations with their members.
@@ -78,11 +110,7 @@ pub async fn list(
     .await?;
     let mut out = Vec::with_capacity(ids.len());
     for (conversation_id,) in ids {
-        let members = conversation_members(&state.db, &conversation_id).await?;
-        out.push(ConversationInfo {
-            id: conversation_id,
-            members,
-        });
+        out.push(conversation_info(&state, &conversation_id).await?);
     }
     Ok(Json(out))
 }
@@ -128,6 +156,84 @@ pub async fn send_message(
         },
     );
     Ok((StatusCode::CREATED, Json(json!({ "id": message_id }))))
+}
+
+/// Validate a group name: bounded length, no control characters.
+fn validate_name(raw: &str) -> Result<String, ApiError> {
+    if raw.len() > MAX_NAME_BYTES {
+        return Err(ApiError::bad_request("name_too_long"));
+    }
+    if raw.chars().any(char::is_control) {
+        return Err(ApiError::bad_request("invalid_name"));
+    }
+    Ok(raw.trim().to_string())
+}
+
+/// Fail with 403 when either side blocks the other.
+pub(crate) async fn blocked_between(state: &AppState, a: i64, b: i64) -> Result<(), ApiError> {
+    let blocked = sqlx::query_as::<_, (i64,)>(
+        "SELECT 1 FROM blocks WHERE (user_id = ?1 AND blocked_user_id = ?2)
+         OR (user_id = ?2 AND blocked_user_id = ?1)",
+    )
+    .bind(a)
+    .bind(b)
+    .fetch_optional(&state.db)
+    .await?;
+    if blocked.is_some() {
+        return Err(ApiError::forbidden("blocked"));
+    }
+    Ok(())
+}
+
+/// Fail with 403 when `user_id` is not the conversation's admin.
+pub(crate) async fn require_admin(
+    state: &AppState,
+    conversation_id: &str,
+    user_id: i64,
+) -> Result<(), ApiError> {
+    let owner =
+        sqlx::query_as::<_, (i64,)>("SELECT owner_user_id FROM conversations WHERE id = ?1")
+            .bind(conversation_id)
+            .fetch_optional(&state.db)
+            .await?
+            .map(|(owner,)| owner);
+    match owner {
+        Some(owner) if owner == user_id => Ok(()),
+        Some(_) => Err(ApiError::forbidden("not_admin")),
+        None => Err(ApiError::not_found()),
+    }
+}
+
+/// One conversation's full info: name, admin, sorted member usernames.
+pub(crate) async fn conversation_info(
+    state: &AppState,
+    conversation_id: &str,
+) -> Result<ConversationInfo, ApiError> {
+    let (name, owner_id) = sqlx::query_as::<_, (String, Option<i64>)>(
+        "SELECT name, owner_user_id FROM conversations WHERE id = ?1",
+    )
+    .bind(conversation_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(ApiError::not_found)?;
+    let admin = match owner_id {
+        Some(owner_id) => {
+            sqlx::query_as::<_, (String,)>("SELECT username FROM users WHERE id = ?1")
+                .bind(owner_id)
+                .fetch_optional(&state.db)
+                .await?
+                .map(|(username,)| username)
+                .unwrap_or_default()
+        }
+        None => String::new(),
+    };
+    let members = conversation_members(&state.db, conversation_id).await?;
+    Ok(ConversationInfo {
+        id: conversation_id.to_string(),
+        name,
+        admin,
+        members,
+    })
 }
 
 /// Canonical member usernames of one conversation, sorted.

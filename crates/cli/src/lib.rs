@@ -3,6 +3,7 @@
 pub mod api;
 pub mod chat;
 pub mod session;
+pub mod store;
 pub mod ws;
 
 use url::Url;

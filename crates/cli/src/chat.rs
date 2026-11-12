@@ -2,13 +2,14 @@
 //! layer together for the CLI commands.
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use thrum_core::envelope::{AppMessage, Envelope, decode_envelope, encode_envelope};
 use thrum_core::mls::{DeviceCrypto, Incoming};
-use thrum_core::protocol::encode_payload;
 
 use crate::api::Client;
 use crate::session::Session;
+use crate::store::Store;
 
 /// Keep at least this many key packages on the server.
 const KEY_PACKAGE_MIN: i64 = 4;
@@ -21,6 +22,8 @@ pub struct Chat {
     pub session: Session,
     crypto: DeviceCrypto,
     mls_dir: PathBuf,
+    /// The device's view of what has been said; survives restarts.
+    store: Mutex<Store>,
 }
 
 impl Chat {
@@ -41,6 +44,7 @@ impl Chat {
             session,
             crypto,
             mls_dir,
+            store: Mutex::new(Store::load(state_file)),
         })
     }
 
@@ -77,11 +81,15 @@ impl Chat {
     }
 
     /// Create a conversation on the server and its MLS group, inviting every
-    /// current device of every member.
-    pub async fn create_conversation(&self, members: &[String]) -> Result<String, String> {
+    /// current device of every member. The caller becomes its admin.
+    pub async fn create_conversation(
+        &self,
+        members: &[String],
+        name: &str,
+    ) -> Result<String, String> {
         let (conversation_id, all_members) = self
             .client
-            .create_conversation_with_members(&self.session.token, members)
+            .create_conversation_with_members(&self.session.token, members, name)
             .await?;
         self.crypto
             .create_group(&conversation_id)
@@ -92,7 +100,7 @@ impl Chat {
     }
 
     /// Add members to a conversation: server membership first, then MLS adds
-    /// with commits and welcomes.
+    /// with commits and welcomes. Admin only, enforced by the server.
     pub async fn add_members(
         &self,
         conversation_id: &str,
@@ -108,7 +116,7 @@ impl Chat {
 
     /// Remove a member: the MLS removal commit goes out first, so the removed
     /// member still receives it and loses access, then the server stops
-    /// delivering to them.
+    /// delivering to them. Admin only, enforced by the server.
     pub async fn remove_member(&self, conversation_id: &str, username: &str) -> Result<(), String> {
         let commit = self.remove_member_mls(conversation_id, username).await?;
         self.client
@@ -116,6 +124,51 @@ impl Chat {
             .await?;
         let _ = commit;
         Ok(())
+    }
+
+    /// Rename a conversation; admin only.
+    pub async fn rename(&self, conversation_id: &str, name: &str) -> Result<(), String> {
+        self.client
+            .rename_conversation(&self.session.token, conversation_id, name)
+            .await
+    }
+
+    /// Mint an invite token for a conversation; admin only.
+    pub async fn create_invite(&self, conversation_id: &str) -> Result<String, String> {
+        self.client
+            .create_invite(&self.session.token, conversation_id)
+            .await
+    }
+
+    /// Revoke an invite token; admin only.
+    pub async fn revoke_invite(
+        &self,
+        conversation_id: &str,
+        invite_token: &str,
+    ) -> Result<(), String> {
+        self.client
+            .revoke_invite(&self.session.token, conversation_id, invite_token)
+            .await
+    }
+
+    /// Redeem an invite token: join on the server. The MLS group follows
+    /// when a member's device runs `sync` and sends this device a welcome.
+    pub async fn join(&self, invite_token: &str) -> Result<String, String> {
+        let (conversation_id, _members) = self
+            .client
+            .redeem_invite(&self.session.token, invite_token)
+            .await?;
+        Ok(conversation_id)
+    }
+
+    /// Block a user.
+    pub async fn block(&self, username: &str) -> Result<(), String> {
+        self.client.block(&self.session.token, username).await
+    }
+
+    /// Lift a block.
+    pub async fn unblock(&self, username: &str) -> Result<(), String> {
+        self.client.unblock(&self.session.token, username).await
     }
 
     /// The MLS half of a removal: build the commit, send it, merge locally.
@@ -186,8 +239,7 @@ impl Chat {
                         .map_err(|error| error.to_string())?;
                     if claimed != identity {
                         return Err(format!(
-                            "server returned a key package for {claimed} \
-                             instead of {identity}"
+                            "server returned a key package for {claimed} instead of {identity}"
                         ));
                     }
                     packages.push(package);
@@ -243,37 +295,152 @@ impl Chat {
                 once: false,
                 timeout_secs: 1,
             },
-            |conversation, sender, payload| self.interpret(conversation, sender, payload),
+            |conversation, message_id, sender, payload| {
+                self.interpret(conversation, message_id, sender, payload)
+            },
             |_| {},
         )
         .await
     }
 
-    /// Encrypt and send a text message; returns the relay message id.
-    pub async fn send_text(&self, conversation_id: &str, text: &str) -> Result<String, String> {
+    /// Encrypt and send any application message; returns the relay message id.
+    async fn send_app(&self, conversation_id: &str, app: &AppMessage) -> Result<String, String> {
         if !self
             .crypto
             .has_group(conversation_id)
             .map_err(|error| error.to_string())?
         {
             return Err("this device has not joined this conversation's group yet; \
-                        run `thrum recv` once to catch up"
+                 run `thrum recv` once to catch up"
                 .to_string());
         }
         self.catch_up().await?;
-        let app = serde_json::to_vec(&AppMessage::Text {
-            text: text.to_string(),
-        })
-        .expect("app message serializes");
+        let app_bytes = serde_json::to_vec(app).expect("app message serializes");
         let wire = self
             .crypto
-            .encrypt(conversation_id, &app)
+            .encrypt(conversation_id, &app_bytes)
             .map_err(|error| error.to_string())?;
         self.persist()?;
         let payload = encode_envelope(&Envelope::mls(&wire));
-        self.client
+        let id = self
+            .client
             .send_message(&self.session.token, conversation_id, &payload)
-            .await
+            .await?;
+        // Remember what this device said, so `edit` and `delete` work at
+        // once and read receipts skip own messages.
+        let mut store = self.store.lock().expect("store lock");
+        if let AppMessage::Text { text } | AppMessage::Reply { text, .. } = app
+            && store.entry(conversation_id, &id).is_none()
+        {
+            store.record(conversation_id, &id, &self.session.username, text);
+        }
+        Ok(id)
+    }
+
+    /// Send a chat text.
+    pub async fn send_text(&self, conversation_id: &str, text: &str) -> Result<String, String> {
+        self.send_app(
+            conversation_id,
+            &AppMessage::Text {
+                text: text.to_string(),
+            },
+        )
+        .await
+    }
+
+    /// Send a reply quoting an earlier message.
+    pub async fn send_reply(
+        &self,
+        conversation_id: &str,
+        reply_to: &str,
+        text: &str,
+    ) -> Result<String, String> {
+        self.send_app(
+            conversation_id,
+            &AppMessage::Reply {
+                reply_to: reply_to.to_string(),
+                text: text.to_string(),
+            },
+        )
+        .await
+    }
+
+    /// Edit a message this device sent.
+    pub async fn send_edit(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+        text: &str,
+    ) -> Result<String, String> {
+        if !self.is_own_message(conversation_id, message_id) {
+            return Err(format!("message {message_id} is not yours to edit"));
+        }
+        self.send_app(
+            conversation_id,
+            &AppMessage::Edit {
+                message_id: message_id.to_string(),
+                text: text.to_string(),
+            },
+        )
+        .await
+    }
+
+    /// Delete a message this device sent.
+    pub async fn send_delete(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+    ) -> Result<String, String> {
+        if !self.is_own_message(conversation_id, message_id) {
+            return Err(format!("message {message_id} is not yours to delete"));
+        }
+        self.send_app(
+            conversation_id,
+            &AppMessage::Delete {
+                message_id: message_id.to_string(),
+            },
+        )
+        .await
+    }
+
+    /// Send read receipts for everything this device has not marked read.
+    pub async fn send_read(&self, conversation_id: &str) -> Result<usize, String> {
+        let unread = self
+            .store
+            .lock()
+            .expect("store lock")
+            .unread_for(conversation_id, &self.session.username);
+        if unread.is_empty() {
+            return Ok(0);
+        }
+        let count = unread.len();
+        self.send_app(
+            conversation_id,
+            &AppMessage::Read {
+                message_ids: unread,
+            },
+        )
+        .await?;
+        Ok(count)
+    }
+
+    /// Whether the local store knows this message as one this user sent.
+    fn is_own_message(&self, conversation_id: &str, message_id: &str) -> bool {
+        self.store
+            .lock()
+            .expect("store lock")
+            .entry(conversation_id, message_id)
+            .is_some_and(|entry| entry.sender == self.session.username)
+    }
+
+    /// Find a message anywhere in the local store: its conversation id and a
+    /// snapshot of its entry.
+    pub fn find_message(&self, message_id: &str) -> Option<(String, crate::store::Entry)> {
+        self.store
+            .lock()
+            .expect("store lock")
+            .find(message_id)
+            .map(|(conversation, entry)| (conversation, entry.clone()))
     }
 
     /// Turn one relay payload into a display line, applying the MLS state
@@ -281,6 +448,7 @@ impl Chat {
     pub fn interpret(
         &self,
         conversation_id: &str,
+        message_id: &str,
         sender_username: &str,
         payload: &[u8],
     ) -> Option<String> {
@@ -303,13 +471,7 @@ impl Chat {
             },
             Envelope::Mls { .. } => match self.crypto.process_incoming(conversation_id, &data) {
                 Ok(Incoming::Application { payload, .. }) => {
-                    match serde_json::from_slice::<AppMessage>(&payload) {
-                        Ok(AppMessage::Text { text }) => {
-                            self.persist().ok()?;
-                            Some(format!("{sender_username}: {text}"))
-                        }
-                        Err(_) => None,
-                    }
+                    self.apply_app_message(conversation_id, message_id, sender_username, &payload)
                 }
                 Ok(Incoming::Commit) => {
                     self.persist().ok()?;
@@ -323,6 +485,60 @@ impl Chat {
             },
         }
     }
+
+    /// Apply a decrypted application message to the store and produce the
+    /// line to display.
+    fn apply_app_message(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+        sender: &str,
+        payload: &[u8],
+    ) -> Option<String> {
+        let message: AppMessage = match serde_json::from_slice(payload) {
+            Ok(message) => message,
+            Err(_) => return None,
+        };
+        self.persist().ok()?;
+        let mut store = self.store.lock().expect("store lock");
+        match message {
+            AppMessage::Text { text } => {
+                if store.entry(conversation_id, message_id).is_none() {
+                    store.record(conversation_id, message_id, sender, &text);
+                }
+                Some(format!("{sender}: {text}"))
+            }
+            AppMessage::Reply { reply_to, text } => {
+                if store.entry(conversation_id, message_id).is_none() {
+                    store.record(conversation_id, message_id, sender, &text);
+                }
+                let short = &reply_to[..reply_to.len().min(8)];
+                Some(format!("{sender}: [re:{short}] {text}"))
+            }
+            AppMessage::Edit {
+                message_id: target,
+                text,
+            } => {
+                if store.edit(conversation_id, &target, sender, &text) {
+                    Some(format!("{sender} edited {target}"))
+                } else {
+                    None
+                }
+            }
+            AppMessage::Delete { message_id: target } => {
+                if store.delete(conversation_id, &target, sender) {
+                    Some(format!("{sender} deleted {target}"))
+                } else {
+                    None
+                }
+            }
+            AppMessage::Read { message_ids } => {
+                let count = message_ids.len();
+                store.mark_read(conversation_id, sender, &message_ids);
+                Some(format!("{sender} read {count} message(s)"))
+            }
+        }
+    }
 }
 
 /// The MLS state directory for a state file: `<state-file>.mls/`.
@@ -334,5 +550,5 @@ fn state_file_mls_dir(state_file: &Path) -> PathBuf {
 
 /// Encode payload bytes for tests and debugging.
 pub fn payload_to_base64(bytes: &[u8]) -> String {
-    encode_payload(bytes)
+    thrum_core::protocol::encode_payload(bytes)
 }

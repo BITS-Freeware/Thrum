@@ -120,12 +120,13 @@ impl Client {
         &self,
         token: &str,
         members: &[String],
+        name: &str,
     ) -> Result<(String, Vec<String>), String> {
         let response = self
             .http
             .post(format!("{}/v1/conversations", self.base))
             .bearer_auth(token)
-            .json(&serde_json::json!({ "members": members }))
+            .json(&serde_json::json!({ "members": members, "name": name }))
             .send()
             .await
             .map_err(|error| format!("request failed: {error}"))?;
@@ -354,5 +355,133 @@ impl Client {
             .as_str()
             .map(str::to_string)
             .ok_or_else(|| "server sent no message id".to_string())
+    }
+
+    /// Rename a conversation; admin only.
+    pub async fn rename_conversation(
+        &self,
+        token: &str,
+        conversation_id: &str,
+        name: &str,
+    ) -> Result<(), String> {
+        let response = self
+            .http
+            .patch(format!(
+                "{}/v1/conversations/{conversation_id}/name",
+                self.base
+            ))
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "name": name }))
+            .send()
+            .await
+            .map_err(|error| format!("request failed: {error}"))?;
+        Self::checked(response).await.map(|_| ())
+    }
+
+    /// Mint an invite token for a conversation; admin only.
+    pub async fn create_invite(
+        &self,
+        token: &str,
+        conversation_id: &str,
+    ) -> Result<String, String> {
+        let response = self
+            .http
+            .post(format!(
+                "{}/v1/conversations/{conversation_id}/invites",
+                self.base
+            ))
+            .bearer_auth(token)
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .map_err(|error| format!("request failed: {error}"))?;
+        let response = Self::checked(response).await?;
+        let body: Value = response
+            .json()
+            .await
+            .map_err(|error| format!("bad invite response: {error}"))?;
+        body["token"]
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| "server sent no token".to_string())
+    }
+
+    /// Revoke an invite token; admin only.
+    pub async fn revoke_invite(
+        &self,
+        token: &str,
+        conversation_id: &str,
+        invite_token: &str,
+    ) -> Result<(), String> {
+        let response = self
+            .http
+            .delete(format!(
+                "{}/v1/conversations/{conversation_id}/invites/{invite_token}",
+                self.base
+            ))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|error| format!("request failed: {error}"))?;
+        Self::checked(response).await.map(|_| ())
+    }
+
+    /// Redeem an invite token and join the conversation.
+    pub async fn redeem_invite(
+        &self,
+        token: &str,
+        invite_token: &str,
+    ) -> Result<(String, Vec<String>), String> {
+        let response = self
+            .http
+            .post(format!("{}/v1/invites/redeem", self.base))
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "token": invite_token }))
+            .send()
+            .await
+            .map_err(|error| format!("request failed: {error}"))?;
+        let response = Self::checked(response).await?;
+        let body: Value = response
+            .json()
+            .await
+            .map_err(|error| format!("bad invite response: {error}"))?;
+        let id = body["id"]
+            .as_str()
+            .ok_or("server sent no conversation id")?
+            .to_string();
+        let members = body["members"]
+            .as_array()
+            .map(|list| {
+                list.iter()
+                    .filter_map(|member| member.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok((id, members))
+    }
+
+    /// Block a user.
+    pub async fn block(&self, token: &str, username: &str) -> Result<(), String> {
+        let response = self
+            .http
+            .post(format!("{}/v1/blocks", self.base))
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "username": username }))
+            .send()
+            .await
+            .map_err(|error| format!("request failed: {error}"))?;
+        Self::checked(response).await.map(|_| ())
+    }
+
+    /// Lift a block.
+    pub async fn unblock(&self, token: &str, username: &str) -> Result<(), String> {
+        let response = self
+            .http
+            .delete(format!("{}/v1/blocks/{username}", self.base))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|error| format!("request failed: {error}"))?;
+        Self::checked(response).await.map(|_| ())
     }
 }

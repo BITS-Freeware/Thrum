@@ -31,6 +31,10 @@ impl ApiError {
         Self::new(StatusCode::CONFLICT, code)
     }
 
+    pub fn forbidden(code: &'static str) -> Self {
+        Self::new(StatusCode::FORBIDDEN, code)
+    }
+
     pub fn not_found() -> Self {
         Self::new(StatusCode::NOT_FOUND, "not_found")
     }
