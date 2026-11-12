@@ -2,6 +2,7 @@
 //!
 //! The MLS layer lives entirely in clients; the server only tracks which
 //! users are in a conversation so it can fan payloads out to their devices.
+//! The conversation's admin (its creator) decides membership.
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -12,7 +13,7 @@ use serde::Deserialize;
 
 use crate::auth;
 use crate::error::ApiError;
-use crate::routes::conversations::{ConversationInfo, conversation_members};
+use crate::routes::conversations::{blocked_between, conversation_info, require_admin};
 use crate::state::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -22,7 +23,7 @@ pub struct AddMembersBody {
 }
 
 /// `POST /v1/conversations/{conversation_id}/members`: add users to the
-/// conversation. The caller must be a member.
+/// conversation. Admin only; blocked relationships refuse the add.
 pub async fn add_members(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -30,7 +31,7 @@ pub async fn add_members(
     axum::Json(body): axum::Json<AddMembersBody>,
 ) -> Result<axum::response::Response, ApiError> {
     let authed = auth::authenticate(&state, &headers).await?;
-    require_member(&state, &conversation_id, authed.user_id).await?;
+    require_admin(&state, &conversation_id, authed.user_id).await?;
 
     let mut added = Vec::new();
     for raw in &body.members {
@@ -41,6 +42,7 @@ pub async fn add_members(
             .await?
             .map(|(id,)| id)
             .ok_or_else(|| ApiError::bad_request("unknown_member"))?;
+        blocked_between(&state, authed.user_id, id).await?;
         added.push(id);
     }
 
@@ -56,26 +58,20 @@ pub async fn add_members(
         .await?;
     }
 
-    let members = conversation_members(&state.db, &conversation_id).await?;
-    Ok((
-        StatusCode::OK,
-        Json(ConversationInfo {
-            id: conversation_id,
-            members,
-        }),
-    )
-        .into_response())
+    let info = conversation_info(&state, &conversation_id).await?;
+    Ok((StatusCode::OK, Json(info)).into_response())
 }
 
 /// `DELETE /v1/conversations/{conversation_id}/members/{username}`: remove a
-/// member (or leave, when removing yourself). The caller must be a member.
+/// member. Admin only; the admin cannot remove themselves, so a group never
+/// loses its admin through its own commands.
 pub async fn remove_member(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path((conversation_id, username)): Path<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
     let authed = auth::authenticate(&state, &headers).await?;
-    require_member(&state, &conversation_id, authed.user_id).await?;
+    require_admin(&state, &conversation_id, authed.user_id).await?;
 
     let name = UserName::new(&username).map_err(|_| ApiError::bad_request("invalid_username"))?;
     let user_id = sqlx::query_as::<_, (i64,)>("SELECT id FROM users WHERE username = ?1")
@@ -84,6 +80,9 @@ pub async fn remove_member(
         .await?
         .map(|(id,)| id)
         .ok_or_else(ApiError::not_found)?;
+    if user_id == authed.user_id {
+        return Err(ApiError::bad_request("admin_cannot_leave"));
+    }
 
     let removed =
         sqlx::query("DELETE FROM conversation_members WHERE conversation_id = ?1 AND user_id = ?2")
@@ -97,23 +96,4 @@ pub async fn remove_member(
         return Err(ApiError::not_found());
     }
     Ok(StatusCode::NO_CONTENT)
-}
-
-/// Fail with 404 when `user_id` is not a member of the conversation.
-async fn require_member(
-    state: &AppState,
-    conversation_id: &str,
-    user_id: i64,
-) -> Result<(), ApiError> {
-    let member = sqlx::query_as::<_, (i64,)>(
-        "SELECT 1 FROM conversation_members WHERE conversation_id = ?1 AND user_id = ?2",
-    )
-    .bind(conversation_id)
-    .bind(user_id)
-    .fetch_optional(&state.db)
-    .await?;
-    if member.is_none() {
-        return Err(ApiError::not_found());
-    }
-    Ok(())
 }

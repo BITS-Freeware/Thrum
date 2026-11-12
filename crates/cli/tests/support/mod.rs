@@ -89,3 +89,14 @@ pub fn recv_until(base: &str, state_file: &str, needle: &str, tries: usize) -> S
 pub async fn pause(millis: u64) {
     tokio::time::sleep(Duration::from_millis(millis)).await;
 }
+
+/// Run the geist3 binary and fail the test on a zero exit; returns stderr.
+pub fn expect_fail(args: &[&str], what: &str) -> String {
+    let output = run_cli(args);
+    assert!(
+        !output.status.success(),
+        "{what} unexpectedly succeeded: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}

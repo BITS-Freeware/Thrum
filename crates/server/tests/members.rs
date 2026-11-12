@@ -69,7 +69,7 @@ async fn add_members_roundtrip() {
 }
 
 #[tokio::test]
-async fn only_a_member_can_add_members() {
+async fn only_the_admin_can_add_members() {
     let app = TestApp::spawn().await;
     let alice = user(&app, "alice").await;
     let bob = user(&app, "bob").await;
@@ -89,7 +89,7 @@ async fn only_a_member_can_add_members() {
         .unwrap()
         .into();
 
-    // Carol is not in the conversation: adding herself must fail.
+    // Carol is neither admin nor member: adding herself must fail.
     let response = app
         .client
         .post(app.url(&format!("/v1/conversations/{id}/members")))
@@ -98,13 +98,24 @@ async fn only_a_member_can_add_members() {
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), 404);
+    assert_eq!(response.status(), 403);
 
-    // Bob, once a member, can add carol.
+    // Bob, a member but not the admin, cannot add carol either.
     let response = app
         .client
         .post(app.url(&format!("/v1/conversations/{id}/members")))
         .bearer_auth(bob["token"].as_str().unwrap())
+        .json(&json!({"members": ["carol"]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 403);
+
+    // The admin can add carol.
+    let response = app
+        .client
+        .post(app.url(&format!("/v1/conversations/{id}/members")))
+        .bearer_auth(alice["token"].as_str().unwrap())
         .json(&json!({"members": ["carol"]}))
         .send()
         .await

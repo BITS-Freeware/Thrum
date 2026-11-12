@@ -52,13 +52,21 @@ pub fn decode_envelope(payload: &[u8]) -> Option<Envelope> {
     serde_json::from_slice(payload).ok()
 }
 
-/// What clients exchange inside MLS application messages. Encrypted like
-/// every other payload; M4 adds more variants here.
+/// What clients exchange inside MLS application messages. Everything here is
+/// encrypted like an ordinary message; the server only ever sees ciphertext.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AppMessage {
     /// A plain chat text.
     Text { text: String },
+    /// A chat text that quotes an earlier message by its relay id.
+    Reply { reply_to: String, text: String },
+    /// Replace the text of an earlier message the sender wrote.
+    Edit { message_id: String, text: String },
+    /// Retract an earlier message the sender wrote.
+    Delete { message_id: String },
+    /// Tell the group these messages have been read (by their relay ids).
+    Read { message_ids: Vec<String> },
 }
 
 #[cfg(test)]

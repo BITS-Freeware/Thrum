@@ -30,7 +30,7 @@ pub struct RecvOptions {
 pub async fn recv(
     session: &Session,
     options: &RecvOptions,
-    mut interpret: impl FnMut(&str, &str, &[u8]) -> Option<String>,
+    mut interpret: impl FnMut(&str, &str, &str, &[u8]) -> Option<String>,
     mut emit: impl FnMut(String),
 ) -> Result<(), String> {
     let url = ws_url(&session.server)?;
@@ -73,6 +73,7 @@ pub async fn recv(
                         if let Some(line) = interpret_payload(
                             &mut interpret,
                             &conversation_id,
+                            &message_id,
                             &sender_username,
                             &payload_base64,
                         ) {
@@ -103,13 +104,14 @@ pub async fn recv(
 
 /// Decode and interpret one base64 payload.
 fn interpret_payload(
-    interpret: &mut impl FnMut(&str, &str, &[u8]) -> Option<String>,
+    interpret: &mut impl FnMut(&str, &str, &str, &[u8]) -> Option<String>,
     conversation_id: &str,
+    message_id: &str,
     sender_username: &str,
     payload_base64: &str,
 ) -> Option<String> {
     let payload = decode_payload(payload_base64)?;
-    interpret(conversation_id, sender_username, &payload)
+    interpret(conversation_id, message_id, sender_username, &payload)
 }
 
 async fn send_frame(
@@ -162,10 +164,11 @@ mod tests {
     fn interpret_payload_decodes_base64() {
         let encoded = geist3_core::protocol::encode_payload(b"plain");
         let line = interpret_payload(
-            &mut |_conversation, _sender, payload| {
+            &mut |_conversation, _message_id, _sender, payload| {
                 Some(String::from_utf8_lossy(payload).into_owned())
             },
             "conv",
+            "m1",
             "alice",
             &encoded,
         );

@@ -39,11 +39,21 @@ enum Command {
         #[arg(long, default_value = "cli")]
         label: String,
     },
-    /// Create a conversation with the given members.
+    /// Create a conversation with the given members; you become its admin.
     Create {
         /// Comma-separated member usernames, e.g. alice,bob.
         #[arg(long = "members")]
         members: String,
+        /// Optional group name.
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Rename a conversation; admin only.
+    Rename {
+        #[arg(long)]
+        conversation: String,
+        #[arg(long)]
+        name: String,
     },
     /// Send a text message to a conversation.
     Send {
@@ -51,6 +61,26 @@ enum Command {
         conversation: String,
         #[arg(long)]
         text: String,
+        /// Quote an earlier message by its id.
+        #[arg(long = "reply-to")]
+        reply_to: Option<String>,
+    },
+    /// Edit a message you sent.
+    Edit {
+        #[arg(long)]
+        message: String,
+        #[arg(long)]
+        text: String,
+    },
+    /// Delete a message you sent.
+    Delete {
+        #[arg(long)]
+        message: String,
+    },
+    /// Tell the group you have read everything so far.
+    Read {
+        #[arg(long)]
+        conversation: String,
     },
     /// Receive messages live until quiet or one is delivered.
     Recv {
@@ -61,7 +91,7 @@ enum Command {
         #[arg(long, default_value_t = 30)]
         timeout: u64,
     },
-    /// Add members to a conversation.
+    /// Add members to a conversation; admin only.
     Add {
         #[arg(long)]
         conversation: String,
@@ -69,12 +99,39 @@ enum Command {
         #[arg(long = "members")]
         members: String,
     },
-    /// Remove a member from a conversation.
+    /// Remove a member from a conversation; admin only.
     Remove {
         #[arg(long)]
         conversation: String,
         #[arg(long)]
         member: String,
+    },
+    /// Mint an invite link for a conversation; admin only.
+    Invite {
+        #[arg(long)]
+        conversation: String,
+    },
+    /// Revoke an invite link; admin only.
+    Revoke {
+        #[arg(long)]
+        conversation: String,
+        #[arg(long)]
+        token: String,
+    },
+    /// Join a conversation with an invite link.
+    Join {
+        #[arg(long)]
+        token: String,
+    },
+    /// Block a user: no new shared conversations with them.
+    Block {
+        #[arg(long)]
+        user: String,
+    },
+    /// Unblock a user.
+    Unblock {
+        #[arg(long)]
+        user: String,
     },
     /// Join new devices to all groups and top up key packages.
     Sync,
@@ -123,29 +180,81 @@ async fn run(cli: &Cli, base: &str) -> Result<(), String> {
                 session.username, session.device_id
             );
         }
-        Command::Create { members } => {
+        Command::Create { members, name } => {
             let session = load_session(&cli.state_file, base)?;
             let chat = Chat::open(client, session, &cli.state_file)?;
             let list = parse_member_list(members)?;
-            let id = chat.create_conversation(&list).await?;
+            let id = chat
+                .create_conversation(&list, name.as_deref().unwrap_or(""))
+                .await?;
             println!("conversation {id}");
         }
-        Command::Send { conversation, text } => {
+        Command::Rename { conversation, name } => {
             let session = load_session(&cli.state_file, base)?;
             let chat = Chat::open(client, session, &cli.state_file)?;
-            let id = chat.send_text(conversation, text).await?;
+            chat.rename(conversation, name).await?;
+            println!("renamed {conversation}");
+        }
+        Command::Send {
+            conversation,
+            text,
+            reply_to,
+        } => {
+            let session = load_session(&cli.state_file, base)?;
+            let chat = Chat::open(client, session, &cli.state_file)?;
+            let id = match reply_to {
+                Some(original) => chat.send_reply(conversation, original, text).await?,
+                None => chat.send_text(conversation, text).await?,
+            };
             println!("sent {id}");
+        }
+        Command::Edit { message, text } => {
+            let session = load_session(&cli.state_file, base)?;
+            let chat = Chat::open(client, session, &cli.state_file)?;
+            let (conversation, entry) = chat
+                .find_message(message)
+                .ok_or_else(|| format!("message {message} is not in this device's store"))?;
+            if entry.sender != chat.session.username {
+                return Err(format!("message {message} is not yours to edit"));
+            }
+            chat.send_edit(&conversation, message, text).await?;
+            println!("edited {message}");
+        }
+        Command::Delete { message } => {
+            let session = load_session(&cli.state_file, base)?;
+            let chat = Chat::open(client, session, &cli.state_file)?;
+            let (conversation, entry) = chat
+                .find_message(message)
+                .ok_or_else(|| format!("message {message} is not in this device's store"))?;
+            if entry.sender != chat.session.username {
+                return Err(format!("message {message} is not yours to delete"));
+            }
+            chat.send_delete(&conversation, message).await?;
+            println!("deleted {message}");
+        }
+        Command::Read { conversation } => {
+            let session = load_session(&cli.state_file, base)?;
+            let chat = Chat::open(client, session, &cli.state_file)?;
+            let count = chat.send_read(conversation).await?;
+            println!("sent read receipts for {count} message(s)");
         }
         Command::Recv { once, timeout } => {
             let session = load_session(&cli.state_file, base)?;
             let chat = Chat::open(client, session, &cli.state_file)?;
+            // Best effort: pull in new devices and redeemed invitations
+            // before listening, so fresh devices get their welcomes promptly.
+            if let Err(error) = chat.sync().await {
+                eprintln!("note: sync failed: {error}");
+            }
             recv(
                 &chat.session,
                 &RecvOptions {
                     once: *once,
                     timeout_secs: *timeout,
                 },
-                |conversation, sender, payload| chat.interpret(conversation, sender, payload),
+                |conversation, message_id, sender, payload| {
+                    chat.interpret(conversation, message_id, sender, payload)
+                },
                 |line| println!("{line}"),
             )
             .await?;
@@ -168,6 +277,39 @@ async fn run(cli: &Cli, base: &str) -> Result<(), String> {
             let chat = Chat::open(client, session, &cli.state_file)?;
             chat.remove_member(conversation, member).await?;
             println!("removed {member}");
+        }
+        Command::Invite { conversation } => {
+            let session = load_session(&cli.state_file, base)?;
+            let chat = Chat::open(client, session, &cli.state_file)?;
+            let token = chat.create_invite(conversation).await?;
+            println!("invite {token}");
+        }
+        Command::Revoke {
+            conversation,
+            token,
+        } => {
+            let session = load_session(&cli.state_file, base)?;
+            let chat = Chat::open(client, session, &cli.state_file)?;
+            chat.revoke_invite(conversation, token).await?;
+            println!("revoked");
+        }
+        Command::Join { token } => {
+            let session = load_session(&cli.state_file, base)?;
+            let chat = Chat::open(client, session, &cli.state_file)?;
+            let conversation = chat.join(token).await?;
+            println!("joined conversation {conversation} on the server; run `recv` to catch up");
+        }
+        Command::Block { user } => {
+            let session = load_session(&cli.state_file, base)?;
+            let chat = Chat::open(client, session, &cli.state_file)?;
+            chat.block(user).await?;
+            println!("blocked {user}");
+        }
+        Command::Unblock { user } => {
+            let session = load_session(&cli.state_file, base)?;
+            let chat = Chat::open(client, session, &cli.state_file)?;
+            chat.unblock(user).await?;
+            println!("unblocked {user}");
         }
         Command::Sync => {
             let session = load_session(&cli.state_file, base)?;
