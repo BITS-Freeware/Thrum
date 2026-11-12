@@ -508,3 +508,110 @@ async fn blocking_stops_new_shared_conversations() {
     let conversation = create(&base, &alice, "bob");
     assert!(!conversation.is_empty());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn attachments_flow_end_to_end() {
+    let server = Server::spawn().await;
+    let base = server.base.clone();
+    let dir = state_dir();
+    let alice = register_and_login(&base, &dir, "alice", PASSWORD_A);
+    let bob = register_and_login(&base, &dir, "bob", PASSWORD_B);
+
+    let conversation = create(&base, &alice, "bob");
+    recv_until(&base, &bob, "joined", 4);
+
+    // Alice sends a small PNG image as an attachment.
+    let payload_dir = format!("{dir}/payload");
+    std::fs::create_dir_all(&payload_dir).expect("payload dir");
+    let original = format!("{payload_dir}/photo.png");
+    let image = image::RgbImage::from_fn(32, 24, |x, y| {
+        image::Rgb([(x * 8) as u8, (y * 10) as u8, 128])
+    });
+    image.save(&original).expect("save png");
+    let plaintext = std::fs::read(&original).expect("read png");
+    assert!(!plaintext.is_empty());
+
+    let out = run_as(
+        &base,
+        &alice,
+        &[
+            "attach",
+            "--conversation",
+            &conversation,
+            "--file",
+            &original,
+        ],
+    );
+    assert!(out.starts_with("sent "), "attach out: {out:?}");
+    let message_id = out.trim().strip_prefix("sent ").expect("id").to_string();
+
+    // Bob receives the notice with the file name.
+    let got = recv_until(&base, &bob, "photo.png", 4);
+    assert!(got.contains("alice sent photo.png"), "got: {got:?}");
+
+    // ...and fetches the attachment by message id; the bytes survive and
+    // still decode as the same image.
+    let saved = format!("{payload_dir}/from-bob/photo.png");
+    let out = run_as(
+        &base,
+        &bob,
+        &["fetch", "--message", &message_id, "--out", &saved],
+    );
+    assert!(out.contains("saved"), "fetch out: {out:?}");
+    assert_eq!(
+        std::fs::read(&saved).expect("fetched file"),
+        plaintext,
+        "fetched bytes must match what was sent"
+    );
+    let decoded = image::open(&saved).expect("fetched file is an image");
+    assert_eq!((decoded.width(), decoded.height()), (32, 24));
+
+    // The server stored only ciphertext: neither the image bytes nor the
+    // file name may appear in the database.
+    let db_bytes = std::fs::read(&server.db_path).expect("read db");
+    assert!(
+        !db_bytes
+            .windows(plaintext.len())
+            .any(|w| w == plaintext.as_slice()),
+        "image bytes in server db"
+    );
+    let db = String::from_utf8_lossy(&db_bytes);
+    assert!(!db.contains("photo.png"), "file name in server db");
+
+    // Nor in any stored blob.
+    let entries = std::fs::read_dir(&server.blob_dir).expect("blob dir");
+    for entry in entries {
+        let bytes = std::fs::read(entry.expect("entry").path()).expect("blob bytes");
+        assert!(
+            !bytes.windows(plaintext.len()).any(|w| w == plaintext),
+            "plaintext stored in a blob"
+        );
+    }
+
+    // A plain text message has no attachment to fetch.
+    let out = run_as(
+        &base,
+        &alice,
+        &[
+            "send",
+            "--conversation",
+            &conversation,
+            "--text",
+            "plain text only",
+        ],
+    );
+    let text_id = out.trim().strip_prefix("sent ").expect("id").to_string();
+    recv_until(&base, &bob, "plain text only", 4);
+    let err = fail_as(&base, &bob, &["fetch", "--message", &text_id]);
+    assert!(
+        err.contains("carries no attachment"),
+        "fetch text err: {err:?}"
+    );
+
+    // An unknown message id fails too.
+    let err = fail_as(&base, &bob, &["fetch", "--message", "no-such-message"]);
+    assert!(
+        err.contains("not in this device's store"),
+        "fetch unknown err: {err:?}"
+    );
+}

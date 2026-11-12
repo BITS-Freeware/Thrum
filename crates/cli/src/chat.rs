@@ -4,12 +4,17 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
+use thrum_core::attachment::{FileKey, KEY_LEN, NONCE_LEN};
 use thrum_core::envelope::{AppMessage, Envelope, decode_envelope, encode_envelope};
 use thrum_core::mls::{DeviceCrypto, Incoming};
+use rand::RngCore;
+use sha2::{Digest, Sha256};
 
 use crate::api::Client;
 use crate::session::Session;
-use crate::store::Store;
+use crate::store::{AttachmentMeta, Store};
 
 /// Keep at least this many key packages on the server.
 const KEY_PACKAGE_MIN: i64 = 4;
@@ -22,6 +27,8 @@ pub struct Chat {
     pub session: Session,
     crypto: DeviceCrypto,
     mls_dir: PathBuf,
+    /// Where received attachments are saved by default.
+    attachments_dir: PathBuf,
     /// The device's view of what has been said; survives restarts.
     store: Mutex<Store>,
 }
@@ -44,6 +51,7 @@ impl Chat {
             session,
             crypto,
             mls_dir,
+            attachments_dir: state_file_attachments_dir(state_file),
             store: Mutex::new(Store::load(state_file)),
         })
     }
@@ -329,12 +337,120 @@ impl Chat {
         // Remember what this device said, so `edit` and `delete` work at
         // once and read receipts skip own messages.
         let mut store = self.store.lock().expect("store lock");
-        if let AppMessage::Text { text } | AppMessage::Reply { text, .. } = app
-            && store.entry(conversation_id, &id).is_none()
-        {
-            store.record(conversation_id, &id, &self.session.username, text);
+        if store.entry(conversation_id, &id).is_none() {
+            match app {
+                AppMessage::Text { text } | AppMessage::Reply { text, .. } => {
+                    store.record(conversation_id, &id, &self.session.username, text);
+                }
+                AppMessage::Attachment {
+                    blob_id,
+                    key_b64,
+                    nonce_b64,
+                    name,
+                    mime,
+                    size,
+                    sha256,
+                } => {
+                    store.record_attachment(
+                        conversation_id,
+                        &id,
+                        &self.session.username,
+                        AttachmentMeta {
+                            blob_id: blob_id.clone(),
+                            key_b64: key_b64.clone(),
+                            nonce_b64: nonce_b64.clone(),
+                            name: name.clone(),
+                            mime: mime.clone(),
+                            size: *size,
+                            sha256: sha256.clone(),
+                        },
+                    );
+                }
+                _ => {}
+            }
         }
         Ok(id)
+    }
+
+    /// Encrypt and send a file as an attachment. Images are resized and
+    /// recompressed first; the file is then encrypted with a fresh per-file
+    /// key, the ciphertext is uploaded under a fresh id, and the key and id
+    /// travel to the group inside the MLS message.
+    pub async fn send_attachment(
+        &self,
+        conversation_id: &str,
+        path: &Path,
+    ) -> Result<String, String> {
+        let prepared = crate::files::prepare_upload(path)?;
+        let key = FileKey::generate();
+        let blob_id = new_blob_id();
+        let ciphertext = thrum_core::attachment::encrypt_file(&key, &blob_id, &prepared.bytes);
+        self.client
+            .upload_blob(&self.session.token, &blob_id, &ciphertext)
+            .await?;
+        let app = AppMessage::Attachment {
+            blob_id,
+            key_b64: encode_b64(&key.key),
+            nonce_b64: encode_b64(&key.nonce),
+            name: prepared.name,
+            mime: prepared.mime,
+            size: prepared.bytes.len() as u64,
+            sha256: sha256_hex(&prepared.bytes),
+        };
+        self.send_app(conversation_id, &app).await
+    }
+
+    /// Fetch, decrypt, checksum-verify and save the attachment of a stored
+    /// message; returns the path written. Without `out`, it lands in this
+    /// device's attachments directory under a collision-free name.
+    pub async fn fetch_attachment(
+        &self,
+        message_id: &str,
+        out: Option<&Path>,
+    ) -> Result<PathBuf, String> {
+        let (conversation, entry) = self
+            .find_message(message_id)
+            .ok_or_else(|| format!("message {message_id} is not in this device's store"))?;
+        let _ = conversation;
+        let meta = entry
+            .attachment
+            .ok_or_else(|| format!("message {message_id} carries no attachment"))?;
+        let key = FileKey {
+            key: decode_b64(&meta.key_b64)
+                .ok()
+                .and_then(|bytes| <[u8; KEY_LEN]>::try_from(bytes).ok())
+                .ok_or_else(|| "stored attachment key is corrupt".to_string())?,
+            nonce: decode_b64(&meta.nonce_b64)
+                .ok()
+                .and_then(|bytes| <[u8; NONCE_LEN]>::try_from(bytes).ok())
+                .ok_or_else(|| "stored attachment nonce is corrupt".to_string())?,
+        };
+        let ciphertext = self
+            .client
+            .fetch_blob(&self.session.token, &meta.blob_id)
+            .await?
+            .ok_or_else(|| "the attachment has expired on the server".to_string())?;
+        let plaintext = thrum_core::attachment::decrypt_file(&key, &meta.blob_id, &ciphertext)
+            .ok_or_else(|| {
+                "the attachment did not decrypt; key and blob do not match".to_string()
+            })?;
+        if sha256_hex(&plaintext) != meta.sha256 {
+            return Err("the attachment failed its checksum; not saving".to_string());
+        }
+        match out {
+            Some(out) => {
+                if let Some(parent) = out.parent()
+                    && !parent.as_os_str().is_empty()
+                {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|error| format!("cannot create {parent:?}: {error}"))?;
+                }
+                std::fs::write(out, &plaintext)
+                    .map_err(|error| format!("cannot write {}: {error}", out.display()))?;
+                Ok(out.to_path_buf())
+            }
+            None => crate::files::save_attachment(&self.attachments_dir, &meta.name, &plaintext),
+        }
     }
 
     /// Send a chat text.
@@ -537,6 +653,35 @@ impl Chat {
                 store.mark_read(conversation_id, sender, &message_ids);
                 Some(format!("{sender} read {count} message(s)"))
             }
+            AppMessage::Attachment {
+                blob_id,
+                key_b64,
+                nonce_b64,
+                name,
+                mime,
+                size,
+                sha256,
+            } => {
+                if store.entry(conversation_id, message_id).is_none() {
+                    let meta = AttachmentMeta {
+                        blob_id,
+                        key_b64,
+                        nonce_b64,
+                        mime,
+                        size,
+                        sha256,
+                        name: name.clone(),
+                    };
+                    store.record_attachment(conversation_id, message_id, sender, meta);
+                    Some(format!(
+                        "{sender} sent {name} ({size} bytes); \
+                         run `thrum fetch --message {message_id}` to save it"
+                    ))
+                } else {
+                    // This device's own echo; it already has the metadata.
+                    None
+                }
+            }
         }
     }
 }
@@ -546,6 +691,43 @@ fn state_file_mls_dir(state_file: &Path) -> PathBuf {
     let mut name = state_file.as_os_str().to_os_string();
     name.push(".mls");
     PathBuf::from(name)
+}
+
+/// The attachments directory for a state file: `<state-file>.attachments/`.
+fn state_file_attachments_dir(state_file: &Path) -> PathBuf {
+    let mut name = state_file.as_os_str().to_os_string();
+    name.push(".attachments");
+    PathBuf::from(name)
+}
+
+fn encode_b64(bytes: &[u8]) -> String {
+    BASE64.encode(bytes)
+}
+
+fn decode_b64(text: &str) -> Result<Vec<u8>, base64::DecodeError> {
+    BASE64.decode(text)
+}
+
+/// SHA-256 of some bytes, hex encoded; attachments carry this so receivers
+/// can check what they decrypt against what was sent.
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(64);
+    for byte in Sha256::digest(bytes) {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
+
+/// A fresh 128-bit blob id, hex encoded. Chosen before encryption because
+/// the per-file key is bound to it as AES-GCM associated data.
+fn new_blob_id() -> String {
+    let mut bytes = [0u8; 16];
+    rand::rng().fill_bytes(&mut bytes);
+    let mut out = String::with_capacity(32);
+    for byte in bytes {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
 }
 
 /// Encode payload bytes for tests and debugging.

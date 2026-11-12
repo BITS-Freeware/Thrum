@@ -6,3 +6,4 @@
 *.sqlite-shm
 *.sqlite-wal
 thrum-state.json
+blobs/

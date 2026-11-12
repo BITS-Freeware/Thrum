@@ -2,6 +2,7 @@
 
 pub mod accounts;
 pub mod auth;
+pub mod blobs;
 pub mod config;
 pub mod db;
 pub mod error;

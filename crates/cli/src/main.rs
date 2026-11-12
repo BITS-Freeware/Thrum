@@ -77,6 +77,23 @@ enum Command {
         #[arg(long)]
         message: String,
     },
+    /// Send a file as an encrypted attachment to a conversation.
+    Attach {
+        #[arg(long)]
+        conversation: String,
+        /// Path of the file to send.
+        #[arg(long)]
+        file: PathBuf,
+    },
+    /// Save the attachment of a received message to a file.
+    Fetch {
+        #[arg(long)]
+        message: String,
+        /// Where to save it; defaults to the attachment's name in this
+        /// device's attachments directory.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
     /// Tell the group you have read everything so far.
     Read {
         #[arg(long)]
@@ -231,6 +248,18 @@ async fn run(cli: &Cli, base: &str) -> Result<(), String> {
             }
             chat.send_delete(&conversation, message).await?;
             println!("deleted {message}");
+        }
+        Command::Attach { conversation, file } => {
+            let session = load_session(&cli.state_file, base)?;
+            let chat = Chat::open(client, session, &cli.state_file)?;
+            let id = chat.send_attachment(conversation, file).await?;
+            println!("sent {id}");
+        }
+        Command::Fetch { message, out } => {
+            let session = load_session(&cli.state_file, base)?;
+            let chat = Chat::open(client, session, &cli.state_file)?;
+            let path = chat.fetch_attachment(message, out.as_deref()).await?;
+            println!("saved {}", path.display());
         }
         Command::Read { conversation } => {
             let session = load_session(&cli.state_file, base)?;

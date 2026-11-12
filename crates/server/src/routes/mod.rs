@@ -1,6 +1,7 @@
 //! HTTP routes.
 
 pub mod accounts;
+pub mod blobs;
 pub mod blocks;
 pub mod conversations;
 pub mod devices;
@@ -64,6 +65,16 @@ pub fn routes(state: AppState) -> Router {
         .route("/v1/invites/redeem", post(invites::redeem))
         .route("/v1/blocks", post(blocks::block))
         .route("/v1/blocks/{username}", delete(blocks::unblock))
+        // The upload cap lives in the handler so it can answer with the
+        // stable `too_large` error code; the body limit only has to sit
+        // above it so the handler, not axum, sees the oversized body.
+        .route(
+            "/v1/blobs",
+            post(blobs::upload).layer(axum::extract::DefaultBodyLimit::max(
+                state.cfg.attachment_max_bytes + 64 * 1024,
+            )),
+        )
+        .route("/v1/blobs/{blob_id}", get(blobs::fetch))
         .route("/v1/ws", get(ws::ws_handler))
         .with_state(state)
 }

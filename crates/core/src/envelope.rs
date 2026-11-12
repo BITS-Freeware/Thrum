@@ -67,6 +67,19 @@ pub enum AppMessage {
     Delete { message_id: String },
     /// Tell the group these messages have been read (by their relay ids).
     Read { message_ids: Vec<String> },
+    /// An attachment: the blob holds the encrypted file, the key and nonce
+    /// here let group members decrypt it. Nothing here is plaintext to the
+    /// server; the whole envelope rides inside MLS.
+    Attachment {
+        blob_id: String,
+        key_b64: String,
+        nonce_b64: String,
+        name: String,
+        mime: String,
+        size: u64,
+        /// SHA-256 of the plaintext, hex encoded.
+        sha256: String,
+    },
 }
 
 #[cfg(test)]
@@ -105,5 +118,25 @@ mod tests {
         );
         let bytes = String::from_utf8(bytes).expect("utf8");
         assert!(bytes.contains(r#""type":"text""#));
+    }
+
+    #[test]
+    fn attachment_message_roundtrip() {
+        let message = AppMessage::Attachment {
+            blob_id: "b1".to_string(),
+            key_b64: "a2V5".to_string(),
+            nonce_b64: "bm9uY2U=".to_string(),
+            name: "photo.jpg".to_string(),
+            mime: "image/jpeg".to_string(),
+            size: 1024,
+            sha256: "ab".repeat(32),
+        };
+        let bytes = serde_json::to_vec(&message).expect("serializes");
+        assert_eq!(
+            serde_json::from_slice::<AppMessage>(&bytes).expect("parses"),
+            message
+        );
+        let bytes = String::from_utf8(bytes).expect("utf8");
+        assert!(bytes.contains(r#""type":"attachment""#));
     }
 }

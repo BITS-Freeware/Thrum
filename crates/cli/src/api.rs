@@ -484,4 +484,44 @@ impl Client {
             .map_err(|error| format!("request failed: {error}"))?;
         Self::checked(response).await.map(|_| ())
     }
+
+    /// Upload an encrypted attachment blob under a client-chosen id.
+    pub async fn upload_blob(
+        &self,
+        token: &str,
+        blob_id: &str,
+        bytes: &[u8],
+    ) -> Result<(), String> {
+        let response = self
+            .http
+            .post(format!("{}/v1/blobs", self.base))
+            .bearer_auth(token)
+            .header("content-type", "application/octet-stream")
+            .header("x-thrum-blob-id", blob_id)
+            .body(bytes.to_vec())
+            .send()
+            .await
+            .map_err(|error| format!("request failed: {error}"))?;
+        Self::checked(response).await.map(|_| ())
+    }
+
+    /// Fetch an encrypted attachment blob; `None` when it is gone (expired).
+    pub async fn fetch_blob(&self, token: &str, blob_id: &str) -> Result<Option<Vec<u8>>, String> {
+        let response = self
+            .http
+            .get(format!("{}/v1/blobs/{blob_id}", self.base))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|error| format!("request failed: {error}"))?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let response = Self::checked(response).await?;
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|error| format!("bad blob response: {error}"))?;
+        Ok(Some(bytes.to_vec()))
+    }
 }
