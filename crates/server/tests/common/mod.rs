@@ -1,13 +1,12 @@
 #![allow(dead_code)] // shared helpers; each test binary uses a subset
 
-use std::net::SocketAddr;
-
 use serde_json::Value;
 
 /// A running server on a random loopback port with its own database.
 pub struct TestApp {
     pub base: String,
     pub client: reqwest::Client,
+    pub db_path: std::path::PathBuf,
     _dir: tempfile::TempDir,
 }
 
@@ -29,15 +28,14 @@ impl TestApp {
             .expect("bind loopback");
         let addr = listener.local_addr().expect("local addr");
         tokio::spawn(async move {
-            let app = thrum_server::build_router(state)
-                .into_make_service_with_connect_info::<SocketAddr>();
-            axum::serve(listener, app)
+            thrum_server::serve(state, listener)
                 .await
                 .expect("server stopped unexpectedly");
         });
         Self {
             base: format!("http://{addr}"),
             client: reqwest::Client::new(),
+            db_path,
             _dir: dir,
         }
     }

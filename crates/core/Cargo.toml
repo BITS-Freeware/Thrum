@@ -7,3 +7,8 @@ repository.workspace = true
 description = "Thrum core: protocol types and client logic shared by all clients"
 
 [dependencies]
+base64.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

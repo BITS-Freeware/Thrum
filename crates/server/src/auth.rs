@@ -8,6 +8,26 @@ use sha2::{Digest, Sha256};
 use crate::error::ApiError;
 use crate::state::AppState;
 
+/// Resolve a raw bearer token to a live device. Shared by the HTTP bearer
+/// path and the WebSocket auth frame.
+pub async fn authenticate_token(state: &AppState, token: &str) -> Result<AuthedDevice, ApiError> {
+    let hash = token_hash(token);
+    let row = sqlx::query_as::<_, (i64, String, String)>(
+        "SELECT u.id, u.username, d.id
+         FROM devices d JOIN users u ON u.id = d.user_id
+         WHERE d.token_hash = ?1 AND d.revoked_at IS NULL",
+    )
+    .bind(&hash)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| ApiError::unauthorized("invalid_token"))?;
+    Ok(AuthedDevice {
+        user_id: row.0,
+        username: row.1,
+        device_id: row.2,
+    })
+}
+
 /// The authenticated caller: one device of one user.
 #[derive(Debug, Clone)]
 pub struct AuthedDevice {
@@ -39,21 +59,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 /// Resolve the `Authorization: Bearer <token>` header to a live device.
 pub async fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<AuthedDevice, ApiError> {
     let token = bearer_token(headers)?;
-    let hash = token_hash(&token);
-    let row = sqlx::query_as::<_, (i64, String, String)>(
-        "SELECT u.id, u.username, d.id
-         FROM devices d JOIN users u ON u.id = d.user_id
-         WHERE d.token_hash = ?1 AND d.revoked_at IS NULL",
-    )
-    .bind(&hash)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(|| ApiError::unauthorized("invalid_token"))?;
-    Ok(AuthedDevice {
-        user_id: row.0,
-        username: row.1,
-        device_id: row.2,
-    })
+    authenticate_token(state, &token).await
 }
 
 fn bearer_token(headers: &HeaderMap) -> Result<String, ApiError> {

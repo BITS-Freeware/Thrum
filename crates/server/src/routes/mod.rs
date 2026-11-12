@@ -1,8 +1,10 @@
 //! HTTP routes.
 
 pub mod accounts;
+pub mod conversations;
 pub mod devices;
 pub mod keypackages;
+pub mod ws;
 
 use axum::Router;
 use axum::routing::{delete, get, post};
@@ -23,6 +25,15 @@ pub fn routes(state: AppState) -> Router {
             get(keypackages::fetch),
         )
         .route("/v1/key-packages", post(keypackages::upload))
+        .route(
+            "/v1/conversations",
+            get(conversations::list).post(conversations::create),
+        )
+        .route(
+            "/v1/conversations/{conversation_id}/messages",
+            post(conversations::send_message),
+        )
+        .route("/v1/ws", get(ws::ws_handler))
         .with_state(state)
 }
 

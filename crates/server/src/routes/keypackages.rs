@@ -33,7 +33,7 @@ pub async fn upload(
         return Err(ApiError::bad_request("empty_key_package"));
     }
     if body.len() > MAX_KEY_PACKAGE_BYTES {
-        return Err(ApiError::payload_too_large());
+        return Err(ApiError::payload_too_large("key_package_too_large"));
     }
     let id = Uuid::new_v4().to_string();
     sqlx::query(
@@ -58,7 +58,7 @@ pub async fn fetch(
         "DELETE FROM key_packages WHERE id = (
              SELECT kp.id FROM key_packages kp JOIN devices d ON d.id = kp.device_id
              WHERE kp.device_id = ?1 AND d.revoked_at IS NULL
-             ORDER BY kp.created_at, kp.id LIMIT 1
+             ORDER BY kp.created_at, kp.rowid LIMIT 1
          )
          RETURNING content",
     )
