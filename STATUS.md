@@ -3,7 +3,7 @@
 Updated after every working session.
 
 - **Current milestone:** M7 (not started)
-- **Last done:** M6 done: web client (Vite+TS, 8 source files + generated wasm bindings) — auth screens, chat list, conversation view with send/edit/delete, group details (add members, rename, invite links), devices list + revoke, encrypted attachments (upload + download), live WebSocket for real-time delivery with reconnect, IndexedDB persistence, dark accessible UI. Rust wasm crate compiles for wasm32-unknown-unknown with getrandom wasm_js backend. Full local gate green: fmt, clippy --workspace --all-targets -D warnings, cargo test (93 tests), web build (103 ms, 45 kB JS + 776 kB gzip wasm).
+- **Last done:** M6 + fixes: web client (Vite+TS, IndexedDB, live WS with 120ms refresh coalescing, read receipts self-marked, draft clearing, auth/chat/group/devices/attachments screens). Wasm crate for web build. CLI e2e fix: Chat::open now checks state.json (M6 unified format) instead of stale identity.json, resolving 7/8 e2e failures. Full local gate green: fmt, clippy --workspace --all-targets -D warnings, cargo test (90 tests), web build.
 - **Next step:** M7 — release build, final polish, tag 0.1.0 per ROADMAP.md.
 - **Blocked on:** nothing.
 
