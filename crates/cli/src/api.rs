@@ -524,4 +524,33 @@ impl Client {
             .map_err(|error| format!("bad blob response: {error}"))?;
         Ok(Some(bytes.to_vec()))
     }
+
+    /// Download a JSON export of everything the server knows about the caller.
+    pub async fn export_account(&self, token: &str) -> Result<serde_json::Value, String> {
+        let response = self
+            .http
+            .get(format!("{}/v1/account/export", self.base))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|error| format!("request failed: {error}"))?;
+        let response = Self::checked(response).await?;
+        response
+            .json()
+            .await
+            .map_err(|error| format!("bad export response: {error}"))
+    }
+
+    /// Permanently delete the account; requires the account password.
+    pub async fn delete_account(&self, token: &str, password: &str) -> Result<(), String> {
+        let response = self
+            .http
+            .delete(format!("{}/v1/account", self.base))
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "password": password }))
+            .send()
+            .await
+            .map_err(|error| format!("request failed: {error}"))?;
+        Self::checked(response).await.map(|_| ())
+    }
 }
