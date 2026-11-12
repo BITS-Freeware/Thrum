@@ -21,40 +21,60 @@ let connected = false;
 /** Unsent composer text per conversation, so live re-renders keep it. */
 const drafts: Record<string, string> = {};
 
-/** Render the current route; replaces the screen's content. */
-function render(): void {
-  const hash = window.location.hash || "#/";
-  const parts = hash.slice(2).split("/"); // "#/x/y" -> ["x","y"]
-  if (!session) {
-    if (parts[0] === "login") renderAuth();
-    else window.location.hash = "#/login";
-    return;
-  }
-  switch (parts[0]) {
-    case "":
-      window.location.hash = "#/chats";
-      break;
-    case "chats":
-      void renderChats();
-      break;
-    case "new":
-      renderNewChat(parts[1] === "invite");
-      break;
-    case "chat":
-      if (parts[1]) void renderConversation(parts[1]);
-      break;
-    case "group":
-      if (parts[1]) void renderGroup(parts[1]);
-      break;
-    case "devices":
-      void renderDevices();
-      break;
-    default:
-      window.location.hash = "#/chats";
-  }
+let renderChain: Promise<void> = Promise.resolve();
+
+/**
+ * Queue one screen render; only one runs at a time. A burst of triggers
+ * (a click's navigation, a live-refresh after incoming frames) must not
+ * interleave at await points and stack two partial screens — two headers
+ * or two message lists — into the DOM. Each job reads the current hash
+ * when it runs, so a queued render behind a newer one still shows the
+ * newest state.
+ */
+function enqueueRender(job: () => Promise<void>): Promise<void> {
+  const run = renderChain.then(job, job);
+  renderChain = run.catch(() => {});
+  return run;
 }
 
-window.addEventListener("hashchange", render);
+/** Render the current route; replaces the screen's content. */
+function render(): Promise<void> {
+  return enqueueRender(async () => {
+    const hash = window.location.hash || "#/";
+    const parts = hash.slice(2).split("/"); // "#/x/y" -> ["x","y"]
+    if (!session) {
+      if (parts[0] === "login") renderAuth();
+      else window.location.hash = "#/login";
+      return;
+    }
+    switch (parts[0]) {
+      case "":
+        window.location.hash = "#/chats";
+        break;
+      case "chats":
+        await renderChats();
+        break;
+      case "new":
+        renderNewChat(parts[1] === "invite");
+        break;
+      case "chat":
+        if (parts[1]) await renderConversation(parts[1]);
+        break;
+      case "group":
+        if (parts[1]) await renderGroup(parts[1]);
+        break;
+      case "devices":
+        await renderDevices();
+        break;
+      default:
+        window.location.hash = "#/chats";
+    }
+  });
+}
+
+window.addEventListener("hashchange", () => {
+  void render();
+});
 
 /** Error text for an API failure, for inline display near forms. */
 function errorText(error: unknown): string {
@@ -279,7 +299,7 @@ function renderNewChat(inviteMode: boolean): void {
     nameLabel.textContent = "Group name (optional)";
     nameInput = document.createElement("input");
     nameInput.name = "name";
-    label.append(nameInput);
+    nameLabel.append(nameInput);
     form.append(label, nameLabel);
   }
   const submit = document.createElement("button");
@@ -372,7 +392,7 @@ async function renderConversation(conversationId: string): Promise<void> {
       attach.disabled = true;
       try {
         await session!.sendAttachment(conversationId, file);
-        await renderConversation(conversationId);
+        await render();
       } catch (caught) {
         showNotice(errorText(caught));
       } finally {
@@ -389,7 +409,7 @@ async function renderConversation(conversationId: string): Promise<void> {
       try {
         await session!.sendText(conversationId, text);
         delete drafts[conversationId];
-        await renderConversation(conversationId);
+        await render();
       } catch (caught) {
         showNotice(errorText(caught));
       } finally {
@@ -489,7 +509,7 @@ function messageItem(conversationId: string, message: StoredMessage): HTMLLIElem
         try {
           await session!.sendEdit(conversationId, message.messageId, replacement);
           await saveMessage({ ...message, text: replacement, edited: true });
-          await renderConversation(conversationId);
+          await render();
         } catch (caught) {
           showNotice(errorText(caught));
         }
@@ -505,7 +525,7 @@ function messageItem(conversationId: string, message: StoredMessage): HTMLLIElem
         try {
           await session!.sendDelete(conversationId, message.messageId);
           await saveMessage({ ...message, deleted: true });
-          await renderConversation(conversationId);
+          await render();
         } catch (caught) {
           showNotice(errorText(caught));
         }
@@ -567,7 +587,7 @@ async function renderGroup(conversationId: string): Promise<void> {
     void (async () => {
       try {
         await session!.addMembers(conversationId, [addInput.value.trim().toLowerCase()]);
-        await renderGroup(conversationId);
+        await render();
       } catch (caught) {
         showNotice(errorText(caught));
       }
@@ -590,7 +610,7 @@ async function renderGroup(conversationId: string): Promise<void> {
     void (async () => {
       try {
         await session!.renameConversation(conversationId, renameInput.value.trim());
-        await renderGroup(conversationId);
+        await render();
       } catch (caught) {
         showNotice(errorText(caught));
       }
@@ -645,7 +665,7 @@ async function renderDevices(): Promise<void> {
           void (async () => {
             try {
               await session!.api.revokeDevice(device.id);
-              await renderDevices();
+              await render();
             } catch (caught) {
               showNotice(errorText(caught));
             }
