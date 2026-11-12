@@ -11,6 +11,7 @@ use tokio::sync::mpsc;
 
 use crate::accounts::now;
 use crate::auth::{self, AuthedDevice};
+use crate::blobs;
 use crate::frames::{parse_client_frame, render_server_frame};
 use crate::messages;
 use crate::state::AppState;
@@ -125,21 +126,19 @@ async fn handle_client_frame(state: &AppState, authed: &AuthedDevice, text: &str
     }
 }
 
-/// Sweep away expired undelivered messages once a minute.
+/// Sweep away expired undelivered messages and expired blobs once a minute.
 pub fn spawn_sweeper(state: AppState) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(60));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             interval.tick().await;
+            // Clean up expired undelivered messages; one failed pass is not
+            // fatal.
             let keep_older_than = now() - state.cfg.queue_ttl_seconds;
-            if messages::cleanup_expired(&state.db, keep_older_than)
-                .await
-                .is_err()
-            {
-                // Keep sweeping; one failed pass is not fatal.
-                continue;
-            }
+            let _ = messages::cleanup_expired(&state.db, keep_older_than).await;
+            // Clean up expired blobs: rows and stored objects.
+            blobs::sweep_expired(&state.db, state.blob_store.as_ref()).await;
         }
     });
 }

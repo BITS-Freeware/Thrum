@@ -6,3 +6,4 @@
 *.sqlite-shm
 *.sqlite-wal
 geist3-state.json
+blobs/

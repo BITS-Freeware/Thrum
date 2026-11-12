@@ -69,3 +69,14 @@ impl From<argon2::password_hash::Error> for ApiError {
         Self::internal()
     }
 }
+
+impl From<crate::blobs::BlobError> for ApiError {
+    fn from(error: crate::blobs::BlobError) -> Self {
+        match error {
+            crate::blobs::BlobError::NotFound => Self::not_found(),
+            crate::blobs::BlobError::Io(_)
+            | crate::blobs::BlobError::Db(_)
+            | crate::blobs::BlobError::S3(_) => Self::internal(),
+        }
+    }
+}

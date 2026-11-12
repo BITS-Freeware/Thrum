@@ -4,6 +4,7 @@
 //! validation of account names, MLS group handling, message framing, and
 //! the wire protocol.
 
+pub mod attachment;
 pub mod envelope;
 pub mod mls;
 pub mod protocol;

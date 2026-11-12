@@ -11,12 +11,16 @@ name = "geist3"
 path = "src/main.rs"
 
 [dependencies]
+base64.workspace = true
 clap.workspace = true
 futures-util.workspace = true
 geist3-core.workspace = true
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+rand.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true
 url.workspace = true

@@ -8,6 +8,21 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+/// What a recipient device needs to fetch and decrypt one attachment.
+/// Key and nonce travel here from inside the encrypted MLS message; the
+/// server never sees them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttachmentMeta {
+    pub blob_id: String,
+    pub key_b64: String,
+    pub nonce_b64: String,
+    pub name: String,
+    pub mime: String,
+    pub size: u64,
+    /// SHA-256 of the plaintext, hex encoded; checked after decryption.
+    pub sha256: String,
+}
+
 /// One known message.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Entry {
@@ -19,6 +34,9 @@ pub struct Entry {
     pub deleted: bool,
     /// Every member device has told us they read it.
     pub read_by: Vec<String>,
+    /// Present when the message carries an attachment.
+    #[serde(default)]
+    pub attachment: Option<AttachmentMeta>,
 }
 
 /// Conversation id → message id → entry.
@@ -53,18 +71,49 @@ impl Store {
 
     /// Record a message someone else (or this device) sent.
     pub fn record(&mut self, conversation_id: &str, message_id: &str, sender: &str, text: &str) {
+        self.insert_entry(
+            conversation_id,
+            message_id,
+            Entry {
+                sender: sender.to_string(),
+                text: text.to_string(),
+                deleted: false,
+                read_by: Vec::new(),
+                attachment: None,
+            },
+        );
+    }
+
+    /// Record a message that carries an attachment; the description doubles
+    /// as the entry text, and the metadata lets `fetch` save the file later.
+    pub fn record_attachment(
+        &mut self,
+        conversation_id: &str,
+        message_id: &str,
+        sender: &str,
+        attachment: AttachmentMeta,
+    ) {
+        self.insert_entry(
+            conversation_id,
+            message_id,
+            Entry {
+                sender: sender.to_string(),
+                text: format!(
+                    "[attachment: {} ({} bytes)]",
+                    attachment.name, attachment.size
+                ),
+                deleted: false,
+                read_by: Vec::new(),
+                attachment: Some(attachment),
+            },
+        );
+    }
+
+    fn insert_entry(&mut self, conversation_id: &str, message_id: &str, entry: Entry) {
         self.conversations
             .entry(conversation_id.to_string())
             .or_default()
-            .insert(
-                message_id.to_string(),
-                Entry {
-                    sender: sender.to_string(),
-                    text: text.to_string(),
-                    deleted: false,
-                    read_by: Vec::new(),
-                },
-            );
+            .insert(message_id.to_string(), entry);
         self.save();
     }
 

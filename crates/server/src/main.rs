@@ -8,7 +8,7 @@ use geist3_server::state::AppState;
 
 #[tokio::main]
 async fn main() {
-    let cfg = Config::default();
+    let cfg = Config::from_env();
     let db_path = std::env::var("GEIST3_DB").unwrap_or_else(|_| "geist3.sqlite".to_string());
     let state = AppState::connect_sqlite(&db_path, cfg)
         .await

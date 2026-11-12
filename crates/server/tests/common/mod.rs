@@ -7,6 +7,9 @@ pub struct TestApp {
     pub base: String,
     pub client: reqwest::Client,
     pub db_path: std::path::PathBuf,
+    /// Directory holding the server's blob store (disk backend).
+    pub blob_dir: std::path::PathBuf,
+    pub state: geist3_server::state::AppState,
     _dir: tempfile::TempDir,
 }
 
@@ -16,9 +19,12 @@ impl TestApp {
         Self::spawn_with(geist3_server::config::Config::default()).await
     }
 
-    /// Spawn a server with custom configuration.
-    pub async fn spawn_with(cfg: geist3_server::config::Config) -> Self {
+    /// Spawn a server with custom configuration. The blob directory is
+    /// always redirected inside the test's temp directory so tests never
+    /// write into the source tree.
+    pub async fn spawn_with(mut cfg: geist3_server::config::Config) -> Self {
         let dir = tempfile::tempdir().expect("temp dir");
+        cfg.blob_dir = dir.path().join("blobs").to_string_lossy().into_owned();
         let db_path = dir.path().join("test.sqlite");
         let state = geist3_server::state::AppState::connect_sqlite(&db_path.to_string_lossy(), cfg)
             .await
@@ -27,15 +33,20 @@ impl TestApp {
             .await
             .expect("bind loopback");
         let addr = listener.local_addr().expect("local addr");
-        tokio::spawn(async move {
-            geist3_server::serve(state, listener)
-                .await
-                .expect("server stopped unexpectedly");
+        tokio::spawn({
+            let state = state.clone();
+            async move {
+                geist3_server::serve(state, listener)
+                    .await
+                    .expect("server stopped unexpectedly");
+            }
         });
         Self {
             base: format!("http://{addr}"),
             client: reqwest::Client::new(),
+            blob_dir: dir.path().join("blobs"),
             db_path,
+            state,
             _dir: dir,
         }
     }
@@ -75,6 +86,19 @@ impl TestApp {
             request = request.bearer_auth(token);
         }
         request.json(body).send().await.expect("request")
+    }
+
+    pub async fn post_bytes(
+        &self,
+        path: &str,
+        token: Option<&str>,
+        body: &[u8],
+    ) -> reqwest::Response {
+        let mut request = self.client.post(self.url(path)).body(body.to_vec());
+        if let Some(token) = token {
+            request = request.bearer_auth(token);
+        }
+        request.send().await.expect("request")
     }
 }
 

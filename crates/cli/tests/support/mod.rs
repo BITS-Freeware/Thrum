@@ -6,6 +6,8 @@ use std::time::Duration;
 pub struct Server {
     pub base: String,
     pub db_path: std::path::PathBuf,
+    /// Directory holding the server's blob store (disk backend).
+    pub blob_dir: std::path::PathBuf,
     _dir: tempfile::TempDir,
 }
 
@@ -13,12 +15,15 @@ impl Server {
     pub async fn spawn() -> Self {
         let dir = tempfile::tempdir().expect("temp dir");
         let db_path = dir.path().join("e2e.sqlite");
-        let state = geist3_server::state::AppState::connect_sqlite(
-            &db_path.to_string_lossy(),
-            geist3_server::config::Config::default(),
-        )
-        .await
-        .expect("test database");
+        // Keep blobs inside the temp dir so tests never write into the
+        // source tree.
+        let cfg = geist3_server::config::Config {
+            blob_dir: dir.path().join("blobs").to_string_lossy().into_owned(),
+            ..geist3_server::config::Config::default()
+        };
+        let state = geist3_server::state::AppState::connect_sqlite(&db_path.to_string_lossy(), cfg)
+            .await
+            .expect("test database");
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind loopback");
@@ -31,6 +36,7 @@ impl Server {
         Self {
             base: format!("http://{addr}"),
             db_path,
+            blob_dir: dir.path().join("blobs"),
             _dir: dir,
         }
     }
