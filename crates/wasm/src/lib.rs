@@ -1,0 +1,359 @@
+//! WebAssembly bindings for the Geist3 core.
+//!
+//! The web client gets exactly the same cryptographic operations as the CLI:
+//! MLS group handling through [`DeviceCrypto`], the per-file attachment
+//! crypto, and the application-message codec. Key material never leaves the
+//! page; the caller stores [`DeviceState`] JSON in IndexedDB.
+
+use geist3_core as core;
+use geist3_core::attachment::{FileKey, decrypt_file, encrypt_file};
+use geist3_core::envelope::AppMessage;
+use geist3_core::mls::{DeviceCrypto, Incoming};
+use geist3_core::protocol::{decode_payload, encode_payload};
+use js_sys::Uint8Array;
+use serde::Serialize;
+use serde_wasm_bindgen::to_value;
+use wasm_bindgen::prelude::*;
+
+/// Turn a JS byte array into a plain `Vec<u8>`.
+fn bytes(value: Uint8Array) -> Vec<u8> {
+    value.to_vec()
+}
+
+/// Turn bytes into a fresh JS byte array.
+fn array(bytes: &[u8]) -> Uint8Array {
+    let array = Uint8Array::new_with_length(bytes.len() as u32);
+    array.copy_from(bytes);
+    array
+}
+
+/// Build a JS object `{ [key]: value, ... }` from string pairs.
+fn object(entries: &[(&str, JsValue)]) -> Result<JsValue, JsValue> {
+    let object = js_sys::Object::new();
+    for (key, value) in entries {
+        js_sys::Reflect::set(&object, &(*key).into(), value).map_err(|error| error)?;
+    }
+    Ok(object.into())
+}
+
+/// A device's MLS state. Create with [`new_device`] or
+/// [`DeviceState::from_json`]; persist with [`DeviceState::to_json`].
+#[wasm_bindgen]
+pub struct DeviceState {
+    inner: DeviceCrypto,
+}
+
+#[wasm_bindgen]
+impl DeviceState {
+    /// Serialize the device's private key material to JSON for IndexedDB.
+    #[wasm_bindgen(js_name = toJSON)]
+    pub fn to_json(&self) -> Result<String, JsValue> {
+        self.inner.to_json().map_err(js_error)
+    }
+
+    /// The device identity (`username#device-id`).
+    #[wasm_bindgen(getter, js_name = identity)]
+    pub fn identity(&self) -> String {
+        self.inner.identity().to_string()
+    }
+
+    /// The username part of the device identity.
+    #[wasm_bindgen(getter, js_name = username)]
+    pub fn username(&self) -> String {
+        self.inner.username().to_string()
+    }
+
+    /// A fresh serialized key package for this device.
+    pub fn new_key_package(&self) -> Result<Uint8Array, JsValue> {
+        self.inner
+            .new_key_package()
+            .map(|bytes| array(&bytes))
+            .map_err(js_error)
+    }
+
+    /// Validate a fetched key package and return the identity it claims.
+    pub fn key_package_identity(&self, package: Uint8Array) -> Result<String, JsValue> {
+        self.inner
+            .key_package_identity(&bytes(package))
+            .map_err(js_error)
+    }
+
+    /// True when this device has joined the conversation's MLS group.
+    pub fn has_group(&self, conversation_id: &str) -> Result<bool, JsValue> {
+        self.inner.has_group(conversation_id).map_err(js_error)
+    }
+
+    /// Create the MLS group for a conversation. Idempotent.
+    pub fn create_group(&self, conversation_id: &str) -> Result<(), JsValue> {
+        self.inner.create_group(conversation_id).map_err(js_error)
+    }
+
+    /// Add members from serialized key packages. Returns
+    /// `{ commit: Uint8Array, welcome: Uint8Array | null }`.
+    pub fn add_members(
+        &self,
+        conversation_id: &str,
+        key_packages: Vec<Uint8Array>,
+    ) -> Result<JsValue, JsValue> {
+        let packages: Vec<Vec<u8>> = key_packages.iter().map(|p| bytes(p.clone())).collect();
+        let (commit, welcome) = self
+            .inner
+            .add_members(conversation_id, &packages)
+            .map_err(js_error)?;
+        let welcome_js = match welcome {
+            Some(welcome) => array(&welcome).into(),
+            None => JsValue::NULL,
+        };
+        object(&[("commit", array(&commit).into()), ("welcome", welcome_js)])
+    }
+
+    /// Remove a member by identity; returns the serialized commit.
+    pub fn remove_member(
+        &self,
+        conversation_id: &str,
+        identity: &str,
+    ) -> Result<Uint8Array, JsValue> {
+        self.inner
+            .remove_member(conversation_id, identity)
+            .map(|bytes| array(&bytes))
+            .map_err(js_error)
+    }
+
+    /// Encrypt an application payload for the conversation's group.
+    pub fn encrypt(
+        &self,
+        conversation_id: &str,
+        payload: Uint8Array,
+    ) -> Result<Uint8Array, JsValue> {
+        self.inner
+            .encrypt(conversation_id, &bytes(payload))
+            .map(|bytes| array(&bytes))
+            .map_err(js_error)
+    }
+
+    /// Process one serialized MLS message. Returns
+    /// `{ kind: "application", sender, payload }`,
+    /// `{ kind: "commit" }` or `{ kind: "ignored" }`.
+    pub fn process_incoming(
+        &self,
+        conversation_id: &str,
+        message: Uint8Array,
+    ) -> Result<JsValue, JsValue> {
+        let incoming = self
+            .inner
+            .process_incoming(conversation_id, &bytes(message))
+            .map_err(js_error)?;
+        match incoming {
+            Incoming::Application { sender, payload } => object(&[
+                ("kind", "application".into()),
+                ("sender", sender.into()),
+                ("payload", array(&payload).into()),
+            ]),
+            Incoming::Commit => object(&[("kind", "commit".into())]),
+            Incoming::Ignored => object(&[("kind", "ignored".into())]),
+        }
+    }
+
+    /// Process a serialized welcome: join the group. Returns the group's
+    /// conversation id.
+    pub fn process_welcome(&self, welcome: Uint8Array) -> Result<String, JsValue> {
+        self.inner
+            .process_welcome(&bytes(welcome))
+            .map_err(js_error)
+    }
+
+    /// The credential identities of all current group members.
+    pub fn group_members(&self, conversation_id: &str) -> Result<js_sys::Array, JsValue> {
+        let members = self
+            .inner
+            .group_members(conversation_id)
+            .map_err(js_error)?;
+        let array = js_sys::Array::new();
+        for member in members {
+            array.push(&member.into());
+        }
+        Ok(array)
+    }
+}
+
+/// Output of `add_members` is built inline; no struct needed.
+
+/// Generate fresh key material for a new device identity
+/// (`username#device-id`).
+#[wasm_bindgen]
+pub fn new_device(identity: String) -> DeviceState {
+    DeviceState {
+        inner: DeviceCrypto::generate(identity),
+    }
+}
+
+/// Reconstruct a device from [`DeviceState::toJSON`] output.
+#[wasm_bindgen(js_name = deviceFromJson)]
+pub fn device_from_json(json: &str) -> Result<DeviceState, JsValue> {
+    DeviceCrypto::from_json(json)
+        .map(|inner| DeviceState { inner })
+        .map_err(js_error)
+}
+
+/// Generate a fresh per-file key and nonce as
+/// `{ keyBase64, nonceBase64 }`, ready to travel inside an
+/// `AppMessage::Attachment`.
+#[wasm_bindgen(js_name = newFileKey)]
+pub fn new_file_key() -> Result<JsValue, JsValue> {
+    use base64::Engine as _;
+    let key = FileKey::generate();
+    let engine = base64::engine::general_purpose::STANDARD;
+    #[derive(Serialize)]
+    struct KeyJs {
+        key_base64: String,
+        nonce_base64: String,
+    }
+    to_value(&KeyJs {
+        key_base64: engine.encode(key.key),
+        nonce_base64: engine.encode(key.nonce),
+    })
+    .map_err(js_error)
+}
+
+/// Encrypt a file for upload; returns the ciphertext with the GCM tag.
+#[wasm_bindgen(js_name = encryptFile)]
+pub fn encrypt_file_js(
+    key_base64: &str,
+    nonce_base64: &str,
+    blob_id: &str,
+    plaintext: Uint8Array,
+) -> Result<Uint8Array, JsValue> {
+    let key = parse_file_key(key_base64, nonce_base64)?;
+    Ok(array(&encrypt_file(&key, blob_id, &bytes(plaintext))))
+}
+
+/// Decrypt a fetched blob; throws when the key, id or bytes do not match.
+#[wasm_bindgen(js_name = decryptFile)]
+pub fn decrypt_file_js(
+    key_base64: &str,
+    nonce_base64: &str,
+    blob_id: &str,
+    ciphertext: Uint8Array,
+) -> Result<Uint8Array, JsValue> {
+    let key = parse_file_key(key_base64, nonce_base64)?;
+    decrypt_file(&key, blob_id, &bytes(ciphertext))
+        .map(|plaintext| array(&plaintext))
+        .ok_or_else(|| JsValue::from_str("attachment decryption failed"))
+}
+
+/// Parse base64 key and nonce strings into a [`FileKey`].
+fn parse_file_key(key_base64: &str, nonce_base64: &str) -> Result<FileKey, JsValue> {
+    use base64::Engine as _;
+    let engine = base64::engine::general_purpose::STANDARD;
+    let decode = |text: &str, expected: usize| -> Result<Vec<u8>, JsValue> {
+        let decoded = engine
+            .decode(text)
+            .map_err(|_| JsValue::from_str("bad attachment key encoding"))?;
+        if decoded.len() != expected {
+            return Err(JsValue::from_str("bad attachment key length"));
+        }
+        Ok(decoded)
+    };
+    let key_bytes = decode(key_base64, core::attachment::KEY_LEN)?;
+    let nonce_bytes = decode(nonce_base64, core::attachment::NONCE_LEN)?;
+    let mut key = FileKey {
+        key: [0u8; core::attachment::KEY_LEN],
+        nonce: [0u8; core::attachment::NONCE_LEN],
+    };
+    key.key.copy_from_slice(&key_bytes);
+    key.nonce.copy_from_slice(&nonce_bytes);
+    Ok(key)
+}
+
+/// Encode an application message object (same JSON shape as the Rust enum)
+/// into the payload bytes that travel inside an MLS message.
+#[wasm_bindgen(js_name = encodeAppMessage)]
+pub fn encode_app_message(message: JsValue) -> Result<Uint8Array, JsValue> {
+    let message: AppMessage = serde_wasm_bindgen::from_value(message).map_err(js_error)?;
+    Ok(array(&serde_json::to_vec(&message).map_err(js_error)?))
+}
+
+/// Decode payload bytes into an application message object.
+#[wasm_bindgen(js_name = decodeAppMessage)]
+pub fn decode_app_message(payload: Uint8Array) -> Result<JsValue, JsValue> {
+    let message: AppMessage = serde_json::from_slice(&bytes(payload)).map_err(js_error)?;
+    to_value(&message).map_err(js_error)
+}
+
+/// Encode a client frame object into the JSON string sent over WebSocket.
+#[wasm_bindgen(js_name = encodeClientFrame)]
+pub fn encode_client_frame(frame: JsValue) -> Result<String, JsValue> {
+    let frame: core::protocol::ClientFrame =
+        serde_wasm_bindgen::from_value(frame).map_err(js_error)?;
+    serde_json::to_string(&frame).map_err(js_error)
+}
+
+/// Parse a WebSocket text frame into a server frame object.
+#[wasm_bindgen(js_name = decodeServerFrame)]
+pub fn decode_server_frame(text: &str) -> Result<JsValue, JsValue> {
+    let frame: core::protocol::ServerFrame = serde_json::from_str(text).map_err(js_error)?;
+    to_value(&frame).map_err(js_error)
+}
+
+/// Wrap serialized MLS bytes as the relay payload (JSON envelope string).
+#[wasm_bindgen(js_name = encodeEnvelope)]
+pub fn encode_envelope(kind: &str, data: Uint8Array) -> Result<Uint8Array, JsValue> {
+    use core::envelope::{Envelope, encode_envelope as encode};
+    let envelope = match kind {
+        "mls" => Envelope::mls(&bytes(data)),
+        "welcome" => Envelope::welcome(&bytes(data)),
+        other => {
+            return Err(JsValue::from_str(&format!(
+                "unknown envelope kind {other:?}"
+            )));
+        }
+    };
+    Ok(array(&encode(&envelope)))
+}
+
+/// Parse a relay payload into `{ kind, data: Uint8Array }`, or null.
+#[wasm_bindgen(js_name = decodeEnvelope)]
+pub fn decode_envelope(payload: Uint8Array) -> Result<JsValue, JsValue> {
+    use core::envelope::{Envelope, decode_envelope as decode};
+    let decoded = match decode(&bytes(payload)) {
+        Some(decoded) => decoded,
+        None => return Ok(JsValue::NULL),
+    };
+    let (kind, data_base64) = match &decoded {
+        Envelope::Mls { data } => ("mls", data),
+        Envelope::Welcome { data } => ("welcome", data),
+    };
+    object(&[
+        ("kind", (*kind).into()),
+        (
+            "data",
+            array(&decode_payload(data_base64).unwrap_or_default()).into(),
+        ),
+    ])
+}
+
+/// Encode bytes as the base64 the relay protocol expects.
+#[wasm_bindgen(js_name = encodePayload)]
+pub fn encode_payload_js(data: Uint8Array) -> String {
+    encode_payload(&bytes(data))
+}
+
+/// Decode relay base64; throws on malformed input.
+#[wasm_bindgen(js_name = decodePayload)]
+pub fn decode_payload_js(encoded: &str) -> Result<Uint8Array, JsValue> {
+    decode_payload(encoded)
+        .map(|bytes| array(&bytes))
+        .ok_or_else(|| JsValue::from_str("bad base64 payload"))
+}
+
+/// Validate and canonicalize an account name; returns the lowercase form.
+#[wasm_bindgen(js_name = validateUserName)]
+pub fn validate_user_name(raw: &str) -> Result<String, JsValue> {
+    core::UserName::new(raw)
+        .map(|name| name.as_str().to_string())
+        .map_err(|_| JsValue::from_str("invalid user name"))
+}
+
+fn js_error<E: std::fmt::Display>(error: E) -> JsValue {
+    JsValue::from_str(&error.to_string())
+}

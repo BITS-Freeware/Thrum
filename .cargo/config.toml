@@ -1,0 +1,4 @@
+# wasm32 builds (the web client) must tell getrandom 0.3+ which browser
+# backend to use; native targets are unaffected by this section.
+[target.wasm32-unknown-unknown]
+rustflags = ['--cfg', 'getrandom_backend="wasm_js"']
