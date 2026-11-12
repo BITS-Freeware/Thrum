@@ -36,7 +36,7 @@ pub async fn create(
     let token = auth::new_session_token();
     sqlx::query(
         "INSERT INTO invites (id, conversation_id, token_hash, created_by, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
+         VALUES ($1, $2, $3, $4, $5)",
     )
     .bind(uuid::Uuid::new_v4().to_string())
     .bind(&conversation_id)
@@ -59,8 +59,8 @@ pub async fn revoke(
     let authed = auth::authenticate(&state, &headers).await?;
     require_admin(&state, &conversation_id, authed.user_id).await?;
     sqlx::query(
-        "UPDATE invites SET revoked_at = ?1
-         WHERE conversation_id = ?2 AND token_hash = ?3 AND revoked_at IS NULL",
+        "UPDATE invites SET revoked_at = $1
+         WHERE conversation_id = $2 AND token_hash = $3 AND revoked_at IS NULL",
     )
     .bind(crate::accounts::now())
     .bind(&conversation_id)
@@ -80,7 +80,7 @@ pub async fn redeem(
     let authed = auth::authenticate(&state, &headers).await?;
     let row = sqlx::query_as::<_, (String, i64)>(
         "SELECT conversation_id, created_by FROM invites
-         WHERE token_hash = ?1 AND revoked_at IS NULL",
+         WHERE token_hash = $1 AND revoked_at IS NULL",
     )
     .bind(auth::token_hash(&body.token))
     .fetch_optional(&state.db)
@@ -90,8 +90,8 @@ pub async fn redeem(
     blocked_between(&state, authed.user_id, created_by).await?;
 
     sqlx::query(
-        "INSERT OR IGNORE INTO conversation_members (conversation_id, user_id, joined_at)
-         VALUES (?1, ?2, ?3)",
+        "INSERT INTO conversation_members (conversation_id, user_id, joined_at)
+         VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
     )
     .bind(&conversation_id)
     .bind(authed.user_id)

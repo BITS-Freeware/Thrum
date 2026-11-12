@@ -36,20 +36,21 @@ pub async fn add_members(
     let mut added = Vec::new();
     for raw in &body.members {
         let name = UserName::new(raw).map_err(|_| ApiError::bad_request("invalid_username"))?;
-        let id = sqlx::query_as::<_, (i64,)>("SELECT id FROM users WHERE username = ?1")
-            .bind(name.as_str())
-            .fetch_optional(&state.db)
-            .await?
-            .map(|(id,)| id)
-            .ok_or_else(|| ApiError::bad_request("unknown_member"))?;
+        let id =
+            sqlx::query_as::<_, (i64,)>("SELECT id FROM users WHERE lower(username) = lower($1)")
+                .bind(name.as_str())
+                .fetch_optional(&state.db)
+                .await?
+                .map(|(id,)| id)
+                .ok_or_else(|| ApiError::bad_request("unknown_member"))?;
         blocked_between(&state, authed.user_id, id).await?;
         added.push(id);
     }
 
     for user_id in added {
         sqlx::query(
-            "INSERT OR IGNORE INTO conversation_members (conversation_id, user_id, joined_at)
-             VALUES (?1, ?2, ?3)",
+            "INSERT INTO conversation_members (conversation_id, user_id, joined_at)
+             VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
         )
         .bind(&conversation_id)
         .bind(user_id)
@@ -74,18 +75,19 @@ pub async fn remove_member(
     require_admin(&state, &conversation_id, authed.user_id).await?;
 
     let name = UserName::new(&username).map_err(|_| ApiError::bad_request("invalid_username"))?;
-    let user_id = sqlx::query_as::<_, (i64,)>("SELECT id FROM users WHERE username = ?1")
-        .bind(name.as_str())
-        .fetch_optional(&state.db)
-        .await?
-        .map(|(id,)| id)
-        .ok_or_else(ApiError::not_found)?;
+    let user_id =
+        sqlx::query_as::<_, (i64,)>("SELECT id FROM users WHERE lower(username) = lower($1)")
+            .bind(name.as_str())
+            .fetch_optional(&state.db)
+            .await?
+            .map(|(id,)| id)
+            .ok_or_else(ApiError::not_found)?;
     if user_id == authed.user_id {
         return Err(ApiError::bad_request("admin_cannot_leave"));
     }
 
     let removed =
-        sqlx::query("DELETE FROM conversation_members WHERE conversation_id = ?1 AND user_id = ?2")
+        sqlx::query("DELETE FROM conversation_members WHERE conversation_id = $1 AND user_id = $2")
             .bind(&conversation_id)
             .bind(user_id)
             .execute(&state.db)

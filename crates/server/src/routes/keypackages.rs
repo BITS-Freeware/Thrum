@@ -37,7 +37,7 @@ pub async fn upload(
     }
     let id = Uuid::new_v4().to_string();
     sqlx::query(
-        "INSERT INTO key_packages (id, device_id, content, created_at) VALUES (?1, ?2, ?3, ?4)",
+        "INSERT INTO key_packages (id, device_id, content, created_at) VALUES ($1, $2, $3, $4)",
     )
     .bind(&id)
     .bind(&authed.device_id)
@@ -54,14 +54,20 @@ pub async fn fetch(
     State(state): State<AppState>,
     Path(device_id): Path<String>,
 ) -> Result<Response, ApiError> {
-    let content = sqlx::query_scalar::<_, Vec<u8>>(
+    // Oldest first; the rowid/seq tiebreak keeps multiple packages created
+    // in the same second in insertion order (see undelivered_for_device).
+    let tiebreak = match state.backend {
+        crate::db::Backend::Sqlite => "kp.rowid",
+        crate::db::Backend::Postgres => "kp.seq",
+    };
+    let content = sqlx::query_scalar::<_, Vec<u8>>(&format!(
         "DELETE FROM key_packages WHERE id = (
              SELECT kp.id FROM key_packages kp JOIN devices d ON d.id = kp.device_id
-             WHERE kp.device_id = ?1 AND d.revoked_at IS NULL
-             ORDER BY kp.created_at, kp.rowid LIMIT 1
+             WHERE kp.device_id = $1 AND d.revoked_at IS NULL
+             ORDER BY kp.created_at, {tiebreak} LIMIT 1
          )
-         RETURNING content",
-    )
+         RETURNING content"
+    ))
     .bind(&device_id)
     .fetch_optional(&state.db)
     .await?
@@ -84,7 +90,7 @@ pub async fn count(
     let (count,): (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM key_packages kp
          JOIN devices d ON d.id = kp.device_id
-         WHERE kp.device_id = ?1 AND d.revoked_at IS NULL",
+         WHERE kp.device_id = $1 AND d.revoked_at IS NULL",
     )
     .bind(&authed.device_id)
     .fetch_one(&state.db)
@@ -104,7 +110,7 @@ pub async fn devices_with_key_packages(
     let rows = sqlx::query_as::<_, (String,)>(
         "SELECT d.id FROM devices d
          JOIN users u ON u.id = d.user_id
-         WHERE u.username = ?1 AND d.revoked_at IS NULL
+         WHERE lower(u.username) = lower($1) AND d.revoked_at IS NULL
            AND EXISTS (SELECT 1 FROM key_packages kp WHERE kp.device_id = d.id)
          ORDER BY d.created_at",
     )

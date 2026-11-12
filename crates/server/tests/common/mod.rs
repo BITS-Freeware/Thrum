@@ -25,8 +25,43 @@ impl TestApp {
     pub async fn spawn_with(mut cfg: geist3_server::config::Config) -> Self {
         let dir = tempfile::tempdir().expect("temp dir");
         cfg.blob_dir = dir.path().join("blobs").to_string_lossy().into_owned();
-        let db_path = dir.path().join("test.sqlite");
-        let state = geist3_server::state::AppState::connect_sqlite(&db_path.to_string_lossy(), cfg)
+        let (db_url, db_path) = match std::env::var("GEIST3_TEST_DB_URL") {
+            // Run the same suite against PostgreSQL: every test gets its
+            // own database so parallel tests cannot interfere.
+            Ok(url) => {
+                sqlx::any::install_default_drivers();
+                static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let base = url
+                    .rsplit_once('/')
+                    .map(|(_, db)| db.split('?').next().unwrap_or(db))
+                    .filter(|db| !db.is_empty())
+                    .unwrap_or("geist3_test")
+                    .chars()
+                    .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                    .collect::<String>();
+                let db_name = format!("{base}_{}_{}", std::process::id(), seq);
+                let admin_url = swap_database(&url, "postgres");
+                let admin = sqlx::any::AnyPoolOptions::new()
+                    .max_connections(1)
+                    .connect(&admin_url)
+                    .await
+                    .expect("admin database");
+                sqlx::query(&format!("CREATE DATABASE \"{db_name}\""))
+                    .execute(&admin)
+                    .await
+                    .expect("create test database");
+                drop(admin);
+                let db_url = swap_database(&url, &db_name);
+                let db_path = std::path::PathBuf::from(&db_url);
+                (db_url, db_path)
+            }
+            Err(_) => {
+                let db_path = dir.path().join("test.sqlite");
+                (db_path.to_string_lossy().into_owned(), db_path.clone())
+            }
+        };
+        let state = geist3_server::state::AppState::connect_database(&db_url, cfg)
             .await
             .expect("test database");
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -128,4 +163,18 @@ pub async fn login(app: &TestApp, username: &str, password: &str, label: &str) -
         .await;
     assert_eq!(response.status(), 200, "login {username}");
     response.json().await.expect("session body")
+}
+
+/// Replace the database name in a connection URL.
+fn swap_database(url: &str, database: &str) -> String {
+    let (scheme, rest) = url.split_once("://").expect("url scheme");
+    let (hostpart, query) = match rest.split_once('?') {
+        Some((host, query)) => (host, Some(query)),
+        None => (rest, None),
+    };
+    let host = hostpart.split('/').next().unwrap_or(hostpart);
+    match query {
+        Some(query) => format!("{scheme}://{host}/{database}?{query}"),
+        None => format!("{scheme}://{host}/{database}"),
+    }
 }

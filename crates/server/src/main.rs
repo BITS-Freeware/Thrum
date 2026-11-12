@@ -9,10 +9,11 @@ use geist3_server::state::AppState;
 #[tokio::main]
 async fn main() {
     let cfg = Config::from_env();
-    let db_path = std::env::var("GEIST3_DB").unwrap_or_else(|_| "geist3.sqlite".to_string());
-    let state = AppState::connect_sqlite(&db_path, cfg)
+    // GEIST3_DB is a SQLite file path (default) or a postgres:// URL.
+    let db_url = std::env::var("GEIST3_DB").unwrap_or_else(|_| "geist3.sqlite".to_string());
+    let state = AppState::connect_database(&db_url, cfg)
         .await
-        .unwrap_or_else(|error| panic!("failed to open database {db_path}: {error}"));
+        .unwrap_or_else(|error| panic!("failed to open database {db_url}: {error}"));
     spawn_sweeper(state.clone());
     let port: u16 = std::env::var("GEIST3_PORT")
         .ok()

@@ -223,7 +223,7 @@ async fn sweeper_removes_expired_blobs() {
     assert!(stored.exists(), "disk store must hold the ciphertext");
 
     // Age the row past retention, then sweep.
-    sqlx::query("UPDATE blobs SET expires_at = ?2 WHERE id = ?1")
+    sqlx::query("UPDATE blobs SET expires_at = $2 WHERE id = $1")
         .bind(&id)
         .bind(geist3_server::accounts::now() - 1)
         .execute(&app.state.db)
@@ -236,7 +236,7 @@ async fn sweeper_removes_expired_blobs() {
 
     // Both the object and the row are gone.
     assert!(!stored.exists(), "expired object must be deleted");
-    let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM blobs WHERE id = ?1")
+    let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM blobs WHERE id = $1")
         .bind(&id)
         .fetch_one(&app.state.db)
         .await

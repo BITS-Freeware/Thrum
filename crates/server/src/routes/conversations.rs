@@ -51,12 +51,13 @@ pub async fn create(
     for raw in &body.members {
         let name_part =
             UserName::new(raw).map_err(|_| ApiError::bad_request("invalid_username"))?;
-        let id = sqlx::query_as::<_, (i64,)>("SELECT id FROM users WHERE username = ?1")
-            .bind(name_part.as_str())
-            .fetch_optional(&state.db)
-            .await?
-            .map(|(id,)| id)
-            .ok_or_else(|| ApiError::bad_request("unknown_member"))?;
+        let id =
+            sqlx::query_as::<_, (i64,)>("SELECT id FROM users WHERE lower(username) = lower($1)")
+                .bind(name_part.as_str())
+                .fetch_optional(&state.db)
+                .await?
+                .map(|(id,)| id)
+                .ok_or_else(|| ApiError::bad_request("unknown_member"))?;
         if id != authed.user_id {
             blocked_between(&state, authed.user_id, id).await?;
             member_ids.push(id);
@@ -83,7 +84,7 @@ pub async fn rename(
     let authed = auth::authenticate(&state, &headers).await?;
     let name = validate_name(&body.name)?;
     require_admin(&state, &conversation_id, authed.user_id).await?;
-    sqlx::query("UPDATE conversations SET name = ?1 WHERE id = ?2")
+    sqlx::query("UPDATE conversations SET name = $1 WHERE id = $2")
         .bind(&name)
         .bind(&conversation_id)
         .execute(&state.db)
@@ -103,7 +104,7 @@ pub async fn list(
 ) -> Result<Json<Vec<ConversationInfo>>, ApiError> {
     let authed = auth::authenticate(&state, &headers).await?;
     let ids = sqlx::query_as::<_, (String,)>(
-        "SELECT conversation_id FROM conversation_members WHERE user_id = ?1 ORDER BY conversation_id",
+        "SELECT conversation_id FROM conversation_members WHERE user_id = $1 ORDER BY conversation_id",
     )
     .bind(authed.user_id)
     .fetch_all(&state.db)
@@ -131,7 +132,7 @@ pub async fn send_message(
         return Err(ApiError::payload_too_large("message_too_large"));
     }
     let member = sqlx::query_as::<_, (i64,)>(
-        "SELECT 1 FROM conversation_members WHERE conversation_id = ?1 AND user_id = ?2",
+        "SELECT 1 FROM conversation_members WHERE conversation_id = $1 AND user_id = $2",
     )
     .bind(&conversation_id)
     .bind(authed.user_id)
@@ -172,8 +173,8 @@ fn validate_name(raw: &str) -> Result<String, ApiError> {
 /// Fail with 403 when either side blocks the other.
 pub(crate) async fn blocked_between(state: &AppState, a: i64, b: i64) -> Result<(), ApiError> {
     let blocked = sqlx::query_as::<_, (i64,)>(
-        "SELECT 1 FROM blocks WHERE (user_id = ?1 AND blocked_user_id = ?2)
-         OR (user_id = ?2 AND blocked_user_id = ?1)",
+        "SELECT 1 FROM blocks WHERE (user_id = $1 AND blocked_user_id = $2)
+         OR (user_id = $2 AND blocked_user_id = $1)",
     )
     .bind(a)
     .bind(b)
@@ -192,7 +193,7 @@ pub(crate) async fn require_admin(
     user_id: i64,
 ) -> Result<(), ApiError> {
     let owner =
-        sqlx::query_as::<_, (i64,)>("SELECT owner_user_id FROM conversations WHERE id = ?1")
+        sqlx::query_as::<_, (i64,)>("SELECT owner_user_id FROM conversations WHERE id = $1")
             .bind(conversation_id)
             .fetch_optional(&state.db)
             .await?
@@ -210,7 +211,7 @@ pub(crate) async fn conversation_info(
     conversation_id: &str,
 ) -> Result<ConversationInfo, ApiError> {
     let (name, owner_id) = sqlx::query_as::<_, (String, Option<i64>)>(
-        "SELECT name, owner_user_id FROM conversations WHERE id = ?1",
+        "SELECT name, owner_user_id FROM conversations WHERE id = $1",
     )
     .bind(conversation_id)
     .fetch_optional(&state.db)
@@ -218,7 +219,7 @@ pub(crate) async fn conversation_info(
     .ok_or_else(ApiError::not_found)?;
     let admin = match owner_id {
         Some(owner_id) => {
-            sqlx::query_as::<_, (String,)>("SELECT username FROM users WHERE id = ?1")
+            sqlx::query_as::<_, (String,)>("SELECT username FROM users WHERE id = $1")
                 .bind(owner_id)
                 .fetch_optional(&state.db)
                 .await?
@@ -238,13 +239,13 @@ pub(crate) async fn conversation_info(
 
 /// Canonical member usernames of one conversation, sorted.
 pub(crate) async fn conversation_members(
-    db: &sqlx::SqlitePool,
+    db: &sqlx::AnyPool,
     conversation_id: &str,
 ) -> Result<Vec<String>, ApiError> {
     let rows = sqlx::query_as::<_, (String,)>(
         "SELECT u.username FROM conversation_members m
          JOIN users u ON u.id = m.user_id
-         WHERE m.conversation_id = ?1 ORDER BY u.username",
+         WHERE m.conversation_id = $1 ORDER BY u.username",
     )
     .bind(conversation_id)
     .fetch_all(db)

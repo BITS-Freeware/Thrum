@@ -50,7 +50,8 @@ pub async fn upload(
         return Err(ApiError::payload_too_large("too_large"));
     }
 
-    let used = blobs::get_daily_bytes(&state.db, authed.user_id).await?;
+    let day_start = accounts::now() - accounts::now() % 86_400;
+    let used = blobs::get_daily_bytes_since(&state.db, authed.user_id, day_start).await?;
     if used.saturating_add(body.len() as u64) > state.cfg.daily_upload_bytes {
         return Err(ApiError::new(
             StatusCode::TOO_MANY_REQUESTS,
@@ -58,7 +59,7 @@ pub async fn upload(
         ));
     }
 
-    let taken: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM blobs WHERE id = ?1")
+    let taken: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM blobs WHERE id = $1")
         .bind(&id)
         .fetch_one(&state.db)
         .await?;
@@ -101,7 +102,7 @@ pub async fn fetch(
     auth::authenticate(&state, &headers).await?;
     let id = blobs::normalize_blob_id(&raw_id).ok_or_else(ApiError::not_found)?;
 
-    let expires_at: (i64,) = sqlx::query_as("SELECT expires_at FROM blobs WHERE id = ?1")
+    let expires_at: (i64,) = sqlx::query_as("SELECT expires_at FROM blobs WHERE id = $1")
         .bind(&id)
         .fetch_optional(&state.db)
         .await?
