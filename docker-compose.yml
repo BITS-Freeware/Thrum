@@ -1,0 +1,31 @@
+services:
+  geist3:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - geist3-data:/data
+    environment:
+      # SQLite by default. For PostgreSQL use the "postgres" profile and
+      # uncomment:
+      # GEIST3_DB: postgres://geist3:geist3@postgres:5432/geist3
+      GEIST3_BLOB_BACKEND: disk
+    restart: unless-stopped
+
+  # Optional: `docker compose --profile postgres up -d` switches the
+  # server to PostgreSQL. The database lives in a named volume; the
+  # credentials below are for the private compose network only.
+  postgres:
+    image: postgres:17
+    profiles: ["postgres"]
+    environment:
+      POSTGRES_USER: geist3
+      POSTGRES_PASSWORD: geist3
+      POSTGRES_DB: geist3
+    volumes:
+      - geist3-postgres:/var/lib/postgresql/data
+    restart: unless-stopped
+
+volumes:
+  geist3-data:
+  geist3-postgres:
