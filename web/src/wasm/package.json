@@ -1,0 +1,21 @@
+{
+  "name": "thrum-wasm",
+  "type": "module",
+  "description": "WebAssembly bindings for the Thrum core, used by the web client",
+  "version": "0.1.0-dev",
+  "license": "AGPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Zyniker13/Thrum"
+  },
+  "files": [
+    "thrum_wasm_bg.wasm",
+    "thrum_wasm.js",
+    "thrum_wasm.d.ts"
+  ],
+  "main": "thrum_wasm.js",
+  "types": "thrum_wasm.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}
