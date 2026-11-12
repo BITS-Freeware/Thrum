@@ -18,6 +18,8 @@ const screen = document.getElementById("screen") as HTMLElement;
 let session: CryptoSession | null = null;
 let live: LiveConnection | null = null;
 let connected = false;
+/** Unsent composer text per conversation, so live re-renders keep it. */
+const drafts: Record<string, string> = {};
 
 /** Render the current route; replaces the screen's content. */
 function render(): void {
@@ -329,7 +331,7 @@ async function renderConversation(conversationId: string): Promise<void> {
   const details = navLink("Details", `#/group/${conversationId}`);
   screen.replaceChildren();
   const label = await labelFor(conversationId);
-  screen.append(header(label, [details, logoutLink()]));
+  screen.append(header(label, [navLink("Chats", "#/chats"), details, logoutLink()]));
   const messages = await loadMessages(conversationId);
   messages.sort((a, b) => a.createdAt - b.createdAt);
   const list = document.createElement("ol");
@@ -342,10 +344,16 @@ async function renderConversation(conversationId: string): Promise<void> {
   const composer = document.createElement("form");
   composer.className = "composer";
   const input = document.createElement("input");
+  input.id = "composer-input";
   input.name = "text";
   input.placeholder = "Write a message";
   input.setAttribute("aria-label", "message text");
   input.autocomplete = "off";
+  // Drafts survive live re-renders triggered by incoming frames.
+  input.value = drafts[conversationId] ?? "";
+  input.addEventListener("input", () => {
+    drafts[conversationId] = input.value;
+  });
   const send = document.createElement("button");
   send.type = "submit";
   send.textContent = "Send";
@@ -380,6 +388,7 @@ async function renderConversation(conversationId: string): Promise<void> {
       send.disabled = true;
       try {
         await session!.sendText(conversationId, text);
+        delete drafts[conversationId];
         await renderConversation(conversationId);
       } catch (caught) {
         showNotice(errorText(caught));
@@ -391,16 +400,24 @@ async function renderConversation(conversationId: string): Promise<void> {
   composer.append(input, send, attach, fileInput);
   screen.append(composer);
   input.focus();
-  // Send read receipts for what is now on screen.
+  input.setSelectionRange(input.value.length, input.value.length);
+  // Send read receipts for what is now on screen, and remember locally
+  // that this device read them so they are not re-sent on every render.
+  const me = session?.current?.username ?? "";
   const unread = messages
-    .filter((message) => message.sender !== session?.current?.username)
-    .filter((message) => !(message.readBy ?? []).includes(session?.current?.username ?? ""));
+    .filter((message) => message.sender !== me)
+    .filter((message) => !(message.readBy ?? []).includes(me));
   if (unread.length > 0) {
     try {
       await session?.sendRead(
         conversationId,
         unread.map((message) => message.messageId),
       );
+      for (const message of unread) {
+        if (!message.readBy.includes(me)) {
+          await saveMessage({ ...message, readBy: [...message.readBy, me] });
+        }
+      }
     } catch {
       // Receipts are best-effort.
     }
@@ -656,9 +673,21 @@ function showNotice(text: string): void {
   setTimeout(() => notice.remove(), 8000);
 }
 
+let refreshTimer: number | null = null;
+
+/** Coalesce bursts of incoming frames into one re-render. */
+function scheduleLiveRefresh(): void {
+  if (refreshTimer !== null) return;
+  refreshTimer = window.setTimeout(() => {
+    refreshTimer = null;
+    render();
+  }, 120);
+}
+
 function startLive(): void {
   live?.stop();
   if (!session) return;
+  session.onActivity = scheduleLiveRefresh;
   live = new LiveConnection(session, (isConnected) => {
     connected = isConnected;
     const status = document.querySelector(".status");
@@ -668,7 +697,7 @@ function startLive(): void {
     }
     if (isConnected) {
       // Refresh whatever screen is open so queued messages appear.
-      render();
+      scheduleLiveRefresh();
     }
   });
   live.start();

@@ -432,6 +432,41 @@ export class CryptoSession {
   }
 
   /**
+   * Observer notified (fire-and-forget) whenever incoming frames change
+   * local state: a welcome joined a group, a commit landed, or an
+   * application message was applied. The UI re-renders on this.
+   */
+  onActivity: (() => void) | null = null;
+
+  /** Fire the activity observer without ever breaking message delivery. */
+  private notify(): void {
+    try {
+      this.onActivity?.();
+    } catch {
+      // Observer errors must not affect the frame pipeline.
+    }
+  }
+
+  /**
+   * Make sure a conversation that just produced traffic is in the local
+   * list: a device that was added to a group only learns the group's
+   * metadata from the server, never from the welcome itself.
+   */
+  private async ensureConversationKnown(conversationId: string): Promise<void> {
+    const conversations = await loadConversations();
+    if (conversations.some((entry) => entry.id === conversationId)) return;
+    const list = await this.api.listConversations();
+    const found = list.find((entry) => entry.id === conversationId);
+    if (found) {
+      await saveConversation({
+        id: found.id,
+        members: found.members,
+        name: found.name ?? null,
+      });
+    }
+  }
+
+  /**
    * Handle one WebSocket server frame. Returns the ack'd message id when
    * the frame was a message (the caller must send the ack), or null.
    */
@@ -487,6 +522,8 @@ export class CryptoSession {
       } catch {
         // Stale or foreign welcome; ignore like the CLI does.
       }
+      await this.ensureConversationKnown(conversationId);
+      this.notify();
       return;
     }
     let incoming: { kind: string; sender?: string; payload?: Uint8Array };
@@ -500,11 +537,14 @@ export class CryptoSession {
     }
     if (incoming.kind === "commit") {
       await this.persist();
+      this.notify();
       return;
     }
     if (incoming.kind !== "application" || !incoming.payload) return;
     const app = (await decodeAppMessage(incoming.payload)) as unknown as Record<string, unknown>;
     await this.applyAppMessage(conversationId, messageId, incoming.sender ?? sender, app);
+    await this.ensureConversationKnown(conversationId);
+    this.notify();
   }
 
   /** Apply a decrypted application message to the local store. */

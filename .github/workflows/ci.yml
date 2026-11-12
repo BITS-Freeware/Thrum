@@ -20,3 +20,26 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: Tests
         run: cargo test
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Typecheck and build the web client
+        run: npm run build
+        working-directory: web
+      - name: Build the server binary
+        run: cargo build -p thrum-server
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+        working-directory: web
+      - name: Browser e2e tests
+        run: npx playwright test
+        working-directory: web

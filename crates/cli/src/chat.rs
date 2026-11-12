@@ -38,7 +38,7 @@ impl Chat {
     /// first time. The state lives next to the session state file.
     pub fn open(client: Client, session: Session, state_file: &Path) -> Result<Self, String> {
         let mls_dir = state_file_mls_dir(state_file);
-        let crypto = if mls_dir.join("identity.json").exists() {
+        let crypto = if mls_dir.join("state.json").exists() {
             DeviceCrypto::load(&mls_dir).map_err(|error| error.to_string())?
         } else {
             let crypto =
