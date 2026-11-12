@@ -35,8 +35,8 @@ impl ApiError {
         Self::new(StatusCode::NOT_FOUND, "not_found")
     }
 
-    pub fn payload_too_large() -> Self {
-        Self::new(StatusCode::PAYLOAD_TOO_LARGE, "key_package_too_large")
+    pub fn payload_too_large(code: &'static str) -> Self {
+        Self::new(StatusCode::PAYLOAD_TOO_LARGE, code)
     }
 
     pub fn too_many_requests() -> Self {

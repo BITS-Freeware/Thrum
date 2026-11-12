@@ -1,5 +1,9 @@
 //! Geist3 command line client library.
 
+pub mod api;
+pub mod session;
+pub mod ws;
+
 use url::Url;
 
 /// Errors from base URL handling.

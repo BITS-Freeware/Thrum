@@ -3,6 +3,7 @@ use std::net::SocketAddr;
 use tokio::net::TcpListener;
 
 use geist3_server::config::Config;
+use geist3_server::routes::ws::spawn_sweeper;
 use geist3_server::state::AppState;
 
 #[tokio::main]
@@ -12,6 +13,7 @@ async fn main() {
     let state = AppState::connect_sqlite(&db_path, cfg)
         .await
         .unwrap_or_else(|error| panic!("failed to open database {db_path}: {error}"));
+    spawn_sweeper(state.clone());
     let port: u16 = std::env::var("GEIST3_PORT")
         .ok()
         .and_then(|value| value.parse().ok())

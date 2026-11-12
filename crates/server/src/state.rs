@@ -4,15 +4,18 @@ use sqlx::SqlitePool;
 
 use crate::config::Config;
 use crate::db;
+use crate::hub::WsHub;
 use crate::ratelimit::RateLimiter;
 
-/// Everything handlers need: the database pool, configuration and the rate
-/// limiter. Cheap to clone; the pool and limiter share their internals.
+/// Everything handlers need: the database pool, configuration, the rate
+/// limiter and the live-connection hub. Cheap to clone; the pool, hub and
+/// limiter share their internals.
 #[derive(Clone)]
 pub struct AppState {
     pub db: SqlitePool,
     pub cfg: Config,
     pub limiter: RateLimiter,
+    pub hub: WsHub,
 }
 
 impl AppState {
@@ -23,6 +26,7 @@ impl AppState {
             db: database,
             cfg,
             limiter: RateLimiter::new(),
+            hub: WsHub::new(),
         })
     }
 }

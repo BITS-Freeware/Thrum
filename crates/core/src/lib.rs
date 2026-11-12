@@ -1,7 +1,10 @@
 //! Geist3 core: protocol types and client logic shared by the CLI and web clients.
 //!
 //! The core holds everything that must behave identically in every client:
-//! validation of account names, MLS group handling, and message framing.
+//! validation of account names, MLS group handling, message framing, and
+//! the wire protocol.
+
+pub mod protocol;
 
 /// Errors returned by core operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
