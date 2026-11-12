@@ -10,10 +10,19 @@ const PASSWORD_B: &str = "correct horse bravo";
 const PASSWORD_C: &str = "correct horse charlie";
 
 /// A fresh temp directory for all CLI state of one test.
+///
+/// The name must be unique per test even though every test in this
+/// binary shares one process id and starts at the same moment: the
+/// system clock can hand two starting threads the same timestamp, so a
+/// per-process counter is mixed in.
 fn state_dir() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!(
-        "thrum-e2e-{}-{}",
+        "thrum-e2e-{}-{}-{}",
         std::process::id(),
+        seq,
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("clock")

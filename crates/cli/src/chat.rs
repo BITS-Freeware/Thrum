@@ -39,7 +39,22 @@ impl Chat {
     pub fn open(client: Client, session: Session, state_file: &Path) -> Result<Self, String> {
         let mls_dir = state_file_mls_dir(state_file);
         let crypto = if mls_dir.join("state.json").exists() {
-            DeviceCrypto::load(&mls_dir).map_err(|error| error.to_string())?
+            let crypto = DeviceCrypto::load(&mls_dir).map_err(|error| error.to_string())?;
+            let expected = format!("{}#{}", session.username, session.device_id);
+            if crypto.identity() != expected {
+                // Keys that do not belong to this session's device would
+                // otherwise be uploaded under it, and other members would
+                // reject the mismatched identity. Failing loudly beats
+                // silently corrupt state.
+                return Err(format!(
+                    "state file holds keys for {} but this session is {}; \
+                     remove {} to provision the device anew",
+                    crypto.identity(),
+                    expected,
+                    mls_dir.display()
+                ));
+            }
+            crypto
         } else {
             let crypto =
                 DeviceCrypto::generate(format!("{}#{}", session.username, session.device_id));
