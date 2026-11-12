@@ -2,9 +2,9 @@
 
 Updated after every working session.
 
-- **Current milestone:** M7 (not started)
-- **Last done:** M6 complete — web Playwright e2e "two users" green 3× in a row (registration, live DM both ways, named group + live group delivery, rename, encrypted attachment round-trip). Fixes that got it there: (1) db.ts withStore resolved `undefined` for void transactions (registration hang); (2) live.ts serializes WS frame handling — the server delivers a message both live and via the catch-up queue and clients must dedupe by id (its own docs say so), plus MLS must see welcome before commit; (3) frames that cannot be applied are left un-acked so the server re-offers them after reconnect instead of being lost (interpret used to swallow errors and ack anyway); (4) main.ts serializes screen renders — two concurrent renders used to stack two headers/lists (the "duplicate hello bob" and double-heading artifacts); (5) the group-name input existed but was appended into the members label — fixed; e2e now fills the group name, so labels are unique on both sides; (6) e2e navigates back to the chat list before the attachment step. CLI e2e parallel flake root-caused and fixed: two tests starting in the same clock tick got identical temp-dir names (pid + timestamp) and shared state files — one test could load another's session ("state file belongs to …") or a torn session/crypto pair (key-package identity mismatch); state_dir now mixes in a per-process counter, and Chat::open fails loudly when loaded keys do not match the session's device. e2e server port moved 8080→8081 (8080 is occupied locally); Playwright artifacts now gitignored; one-off diagnostic scripts removed. Workspace gate green 4× in a row.
-- **Next step:** M7 — release build, final polish, tag 0.1.0 per ROADMAP.md.
+- **Current milestone:** M7 (hardening + 0.1.0)
+- **Last done:** M6 closed and CI green (run 599fee4: rust + web jobs, incl. first CI-run Playwright e2e). Last fixes: CLI e2e parallel flake root-caused (same-clock-tick temp-dir collisions shared state files; state_dir now uses a per-process counter; Chat::open rejects foreign-identity key material) and the CI web job never installed node_modules (added npm ci).
+- **Next step:** M7 order: env-var configuration + Docker Compose + self-hosting guide, then Postgres support, data export + account deletion, fuzz tests, threat-model pass, CHANGELOG + v0.1.0 tag.
 - **Blocked on:** nothing.
 
 ## Log
