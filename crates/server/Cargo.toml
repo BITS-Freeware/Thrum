@@ -24,6 +24,7 @@ sha2.workspace = true
 sqlx.workspace = true
 thiserror = "2"
 tokio.workspace = true
+percent-encoding = "2"
 uuid.workspace = true
 
 [dev-dependencies]

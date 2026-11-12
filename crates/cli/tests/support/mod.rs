@@ -21,9 +21,10 @@ impl Server {
             blob_dir: dir.path().join("blobs").to_string_lossy().into_owned(),
             ..thrum_server::config::Config::default()
         };
-        let state = thrum_server::state::AppState::connect_sqlite(&db_path.to_string_lossy(), cfg)
-            .await
-            .expect("test database");
+        let state =
+            thrum_server::state::AppState::connect_database(&db_path.to_string_lossy(), cfg)
+                .await
+                .expect("test database");
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind loopback");

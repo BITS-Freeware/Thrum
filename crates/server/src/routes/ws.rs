@@ -42,7 +42,9 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
     // Drop messages nobody can still fetch before showing what is left.
     let keep_older_than = now() - state.cfg.queue_ttl_seconds;
     let _ = messages::cleanup_expired(&state.db, keep_older_than).await;
-    if let Ok(queued) = messages::undelivered_for_device(&state.db, &authed.device_id).await {
+    if let Ok(queued) =
+        messages::undelivered_for_device(&state.db, state.backend, &authed.device_id).await
+    {
         for frame in queued {
             let _ = outbound_tx.send(frame);
         }

@@ -4,7 +4,7 @@ use argon2::Argon2;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use thrum_core::UserName;
 use rand::RngCore;
-use sqlx::SqlitePool;
+use sqlx::AnyPool;
 use std::sync::OnceLock;
 use uuid::Uuid;
 
@@ -64,21 +64,18 @@ fn dummy_hash() -> &'static str {
 
 /// Insert a user with the given canonical name and password.
 /// Fails with `username_taken` when the name is already in use.
-pub async fn create_user(
-    db: &SqlitePool,
-    name: &UserName,
-    password: &str,
-) -> Result<i64, ApiError> {
+pub async fn create_user(db: &AnyPool, name: &UserName, password: &str) -> Result<i64, ApiError> {
     let password_hash = hash_password(password)?;
-    let result =
-        sqlx::query("INSERT INTO users (username, password_hash, created_at) VALUES (?1, ?2, ?3)")
-            .bind(name.as_str())
-            .bind(&password_hash)
-            .bind(now())
-            .execute(db)
-            .await;
+    let result = sqlx::query_scalar::<_, i64>(
+        "INSERT INTO users (username, password_hash, created_at) VALUES ($1, $2, $3) RETURNING id",
+    )
+    .bind(name.as_str())
+    .bind(&password_hash)
+    .bind(now())
+    .fetch_one(db)
+    .await;
     match result {
-        Ok(inserted) => Ok(inserted.last_insert_rowid()),
+        Ok(id) => Ok(id),
         Err(error) => {
             let unique = error
                 .as_database_error()
@@ -101,13 +98,13 @@ fn verify_password(password: &str, stored: &PasswordHash<'_>) -> Result<(), ApiE
 
 /// Create a device with its own session token for `user_id`.
 pub async fn create_device(
-    db: &SqlitePool,
+    db: &AnyPool,
     user_id: i64,
     label: &str,
 ) -> Result<(String, String), ApiError> {
     let device_id = Uuid::new_v4().to_string();
     let token = auth::new_session_token();
-    sqlx::query("INSERT INTO devices (id, user_id, label, token_hash, created_at) VALUES (?1, ?2, ?3, ?4, ?5)")
+    sqlx::query("INSERT INTO devices (id, user_id, label, token_hash, created_at) VALUES ($1, $2, $3, $4, $5)")
         .bind(&device_id)
         .bind(user_id)
         .bind(label)
@@ -131,7 +128,7 @@ pub struct Session {
 /// Unknown names and wrong passwords return the same error and take the
 /// same time, so logins do not reveal whether an account exists.
 pub async fn login(
-    db: &SqlitePool,
+    db: &AnyPool,
     username: &str,
     password: &str,
     device_label: &str,
@@ -139,7 +136,7 @@ pub async fn login(
     let invalid = || ApiError::unauthorized("invalid_credentials");
     let name = UserName::new(username).map_err(|_| invalid())?;
     let row = sqlx::query_as::<_, (i64, String)>(
-        "SELECT id, password_hash FROM users WHERE username = ?1",
+        "SELECT id, password_hash FROM users WHERE lower(username) = lower($1)",
     )
     .bind(name.as_str())
     .fetch_optional(db)

@@ -15,7 +15,7 @@ pub async fn authenticate_token(state: &AppState, token: &str) -> Result<AuthedD
     let row = sqlx::query_as::<_, (i64, String, String)>(
         "SELECT u.id, u.username, d.id
          FROM devices d JOIN users u ON u.id = d.user_id
-         WHERE d.token_hash = ?1 AND d.revoked_at IS NULL",
+         WHERE d.token_hash = $1 AND d.revoked_at IS NULL",
     )
     .bind(&hash)
     .fetch_optional(&state.db)

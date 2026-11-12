@@ -10,8 +10,9 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 use rand::RngCore;
-use sqlx::SqlitePool;
+use sqlx::AnyPool;
 
+use crate::accounts::now;
 use crate::config::Config;
 
 /// A blob id is 128 bits of randomness, hex encoded: 32 hex characters.
@@ -187,9 +188,9 @@ impl BlobStore for S3Store {
 
 // ── Database helpers ────────────────────────────────────────────────
 
-/// Insert a blob record; `created_at` is the current UTC time.
+/// Insert a blob record; `created_at` is the current Unix time in seconds.
 pub async fn insert_blob(
-    db: &SqlitePool,
+    db: &AnyPool,
     id: &str,
     uploader_id: i64,
     size: usize,
@@ -197,42 +198,47 @@ pub async fn insert_blob(
 ) -> sqlx::Result<()> {
     sqlx::query(
         "INSERT INTO blobs (id, uploader_id, size, expires_at, created_at)
-         VALUES (?1, ?2, ?3, ?4, datetime('now'))",
+         VALUES ($1, $2, $3, $4, $5)",
     )
     .bind(id)
     .bind(uploader_id)
     .bind(size as i64)
     .bind(expires_at)
+    .bind(now())
     .execute(db)
     .await?;
     Ok(())
 }
 
-/// Sum of blob sizes uploaded by `user_id` on the current UTC calendar day.
-pub async fn get_daily_bytes(db: &SqlitePool, user_id: i64) -> sqlx::Result<u64> {
+/// Sum of blob sizes uploaded by `user_id` since `since_seconds`
+/// (the start of the current UTC day).
+pub async fn get_daily_bytes_since(
+    db: &AnyPool,
+    user_id: i64,
+    since_seconds: i64,
+) -> sqlx::Result<u64> {
     let (sum,): (Option<i64>,) = sqlx::query_as(
-        "SELECT COALESCE(SUM(size), 0) FROM blobs
-         WHERE uploader_id = ?1 AND date(created_at) = date('now')",
+        "SELECT CAST(COALESCE(SUM(size), 0) AS BIGINT) FROM blobs
+         WHERE uploader_id = $1 AND created_at >= $2",
     )
     .bind(user_id)
+    .bind(since_seconds)
     .fetch_one(db)
     .await?;
     Ok(sum.unwrap_or(0).max(0) as u64)
 }
 
 /// Return blob ids whose expiry has passed.
-pub async fn expired_blob_ids(db: &SqlitePool) -> sqlx::Result<Vec<String>> {
-    sqlx::query_scalar::<_, String>(
-        "SELECT id FROM blobs
-         WHERE expires_at < CAST(strftime('%s', 'now') AS INTEGER)",
-    )
-    .fetch_all(db)
-    .await
+pub async fn expired_blob_ids(db: &AnyPool) -> sqlx::Result<Vec<String>> {
+    sqlx::query_scalar::<_, String>("SELECT id FROM blobs WHERE expires_at < $1")
+        .bind(now())
+        .fetch_all(db)
+        .await
 }
 
 /// Delete a blob row by id.
-pub async fn delete_blob_row(db: &SqlitePool, id: &str) -> sqlx::Result<()> {
-    sqlx::query("DELETE FROM blobs WHERE id = ?1")
+pub async fn delete_blob_row(db: &AnyPool, id: &str) -> sqlx::Result<()> {
+    sqlx::query("DELETE FROM blobs WHERE id = $1")
         .bind(id)
         .execute(db)
         .await?;
@@ -242,7 +248,7 @@ pub async fn delete_blob_row(db: &SqlitePool, id: &str) -> sqlx::Result<()> {
 /// Remove every expired blob: the row from the database and the object from
 /// storage. Returns how many blobs were removed. Missing objects count as
 /// removed; storage backends may race with the sweep.
-pub async fn sweep_expired(db: &SqlitePool, store: &dyn BlobStore) -> usize {
+pub async fn sweep_expired(db: &AnyPool, store: &dyn BlobStore) -> usize {
     let Ok(ids) = expired_blob_ids(db).await else {
         return 0;
     };

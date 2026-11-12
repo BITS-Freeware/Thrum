@@ -29,7 +29,7 @@ pub async fn list(
     let authed = auth::authenticate(&state, &headers).await?;
     let rows = sqlx::query(
         "SELECT id, label, created_at, revoked_at FROM devices
-         WHERE user_id = ?1 ORDER BY created_at, id",
+         WHERE user_id = $1 ORDER BY created_at, id",
     )
     .bind(authed.user_id)
     .fetch_all(&state.db)
@@ -54,7 +54,7 @@ pub async fn revoke(
     Path(device_id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     let authed: AuthedDevice = auth::authenticate(&state, &headers).await?;
-    let owner = sqlx::query_as::<_, (i64,)>("SELECT user_id FROM devices WHERE id = ?1")
+    let owner = sqlx::query_as::<_, (i64,)>("SELECT user_id FROM devices WHERE id = $1")
         .bind(&device_id)
         .fetch_optional(&state.db)
         .await?
@@ -62,12 +62,12 @@ pub async fn revoke(
     if owner.0 != authed.user_id {
         return Err(ApiError::not_found());
     }
-    sqlx::query("UPDATE devices SET revoked_at = ?1 WHERE id = ?2 AND revoked_at IS NULL")
+    sqlx::query("UPDATE devices SET revoked_at = $1 WHERE id = $2 AND revoked_at IS NULL")
         .bind(accounts::now())
         .bind(&device_id)
         .execute(&state.db)
         .await?;
-    sqlx::query("DELETE FROM key_packages WHERE device_id = ?1")
+    sqlx::query("DELETE FROM key_packages WHERE device_id = $1")
         .bind(&device_id)
         .execute(&state.db)
         .await?;

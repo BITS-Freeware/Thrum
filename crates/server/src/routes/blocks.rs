@@ -30,17 +30,18 @@ pub async fn block(
     let authed = auth::authenticate(&state, &headers).await?;
     let name =
         UserName::new(&body.username).map_err(|_| ApiError::bad_request("invalid_username"))?;
-    let target = sqlx::query_as::<_, (i64,)>("SELECT id FROM users WHERE username = ?1")
-        .bind(name.as_str())
-        .fetch_optional(&state.db)
-        .await?
-        .map(|(id,)| id)
-        .ok_or_else(ApiError::not_found)?;
+    let target =
+        sqlx::query_as::<_, (i64,)>("SELECT id FROM users WHERE lower(username) = lower($1)")
+            .bind(name.as_str())
+            .fetch_optional(&state.db)
+            .await?
+            .map(|(id,)| id)
+            .ok_or_else(ApiError::not_found)?;
     if target == authed.user_id {
         return Err(ApiError::bad_request("cannot_block_self"));
     }
     sqlx::query(
-        "INSERT OR IGNORE INTO blocks (user_id, blocked_user_id, created_at) VALUES (?1, ?2, ?3)",
+        "INSERT INTO blocks (user_id, blocked_user_id, created_at) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
     )
     .bind(authed.user_id)
     .bind(target)
@@ -58,13 +59,14 @@ pub async fn unblock(
 ) -> Result<StatusCode, ApiError> {
     let authed = auth::authenticate(&state, &headers).await?;
     let name = UserName::new(&username).map_err(|_| ApiError::bad_request("invalid_username"))?;
-    let target = sqlx::query_as::<_, (i64,)>("SELECT id FROM users WHERE username = ?1")
-        .bind(name.as_str())
-        .fetch_optional(&state.db)
-        .await?
-        .map(|(id,)| id)
-        .ok_or_else(ApiError::not_found)?;
-    sqlx::query("DELETE FROM blocks WHERE user_id = ?1 AND blocked_user_id = ?2")
+    let target =
+        sqlx::query_as::<_, (i64,)>("SELECT id FROM users WHERE lower(username) = lower($1)")
+            .bind(name.as_str())
+            .fetch_optional(&state.db)
+            .await?
+            .map(|(id,)| id)
+            .ok_or_else(ApiError::not_found)?;
+    sqlx::query("DELETE FROM blocks WHERE user_id = $1 AND blocked_user_id = $2")
         .bind(authed.user_id)
         .bind(target)
         .execute(&state.db)

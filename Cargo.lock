@@ -1111,6 +1111,7 @@ dependencies = [
  "futures-util",
  "thrum-core",
  "object_store",
+ "percent-encoding",
  "rand 0.9.5",
  "reqwest",
  "serde",
