@@ -73,3 +73,45 @@ pub async fn fetch(
     )
         .into_response())
 }
+
+/// `GET /v1/key-packages/count`: how many key packages the caller's device
+/// still has in stock. Clients use this to know when to top up.
+pub async fn count(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    let authed = auth::authenticate(&state, &headers).await?;
+    let (count,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM key_packages kp
+         JOIN devices d ON d.id = kp.device_id
+         WHERE kp.device_id = ?1 AND d.revoked_at IS NULL",
+    )
+    .bind(&authed.device_id)
+    .fetch_one(&state.db)
+    .await?;
+    Ok(Json(json!({ "count": count })))
+}
+
+/// `GET /v1/users/{username}/key-package-devices`: the device ids of a user
+/// that currently have at least one unconsumed key package. Anyone adding a
+/// user to a conversation needs one key package per device.
+pub async fn devices_with_key_packages(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(username): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    auth::authenticate(&state, &headers).await?;
+    let rows = sqlx::query_as::<_, (String,)>(
+        "SELECT d.id FROM devices d
+         JOIN users u ON u.id = d.user_id
+         WHERE u.username = ?1 AND d.revoked_at IS NULL
+           AND EXISTS (SELECT 1 FROM key_packages kp WHERE kp.device_id = d.id)
+         ORDER BY d.created_at",
+    )
+    .bind(&username)
+    .fetch_all(&state.db)
+    .await?;
+    Ok(Json(
+        json!({ "devices": rows.into_iter().map(|(id,)| id).collect::<Vec<_>>() }),
+    ))
+}

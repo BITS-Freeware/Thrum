@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use thrum_cli::api::Client;
+use thrum_cli::chat::Chat;
 use thrum_cli::session::{self, Session};
 use thrum_cli::ws::{RecvOptions, recv};
 
@@ -60,6 +61,23 @@ enum Command {
         #[arg(long, default_value_t = 30)]
         timeout: u64,
     },
+    /// Add members to a conversation.
+    Add {
+        #[arg(long)]
+        conversation: String,
+        /// Comma-separated member usernames to add.
+        #[arg(long = "members")]
+        members: String,
+    },
+    /// Remove a member from a conversation.
+    Remove {
+        #[arg(long)]
+        conversation: String,
+        #[arg(long)]
+        member: String,
+    },
+    /// Join new devices to all groups and top up key packages.
+    Sync,
     /// Show the stored session.
     Whoami,
 }
@@ -98,6 +116,8 @@ async fn run(cli: &Cli, base: &str) -> Result<(), String> {
         } => {
             let session = client.login(username, password, label).await?;
             session::save(&cli.state_file, &session)?;
+            let chat = Chat::open(client.clone(), session.clone(), &cli.state_file)?;
+            chat.top_up_key_packages().await?;
             println!(
                 "logged in {} (device {})",
                 session.username, session.device_id
@@ -105,36 +125,55 @@ async fn run(cli: &Cli, base: &str) -> Result<(), String> {
         }
         Command::Create { members } => {
             let session = load_session(&cli.state_file, base)?;
-            let list: Vec<String> = members
-                .split(',')
-                .map(str::trim)
-                .filter(|member| !member.is_empty())
-                .map(str::to_string)
-                .collect();
-            if list.is_empty() {
-                return Err("no members given".to_string());
-            }
-            let id = client.create_conversation(&session.token, &list).await?;
+            let chat = Chat::open(client, session, &cli.state_file)?;
+            let list = parse_member_list(members)?;
+            let id = chat.create_conversation(&list).await?;
             println!("conversation {id}");
         }
         Command::Send { conversation, text } => {
             let session = load_session(&cli.state_file, base)?;
-            let id = client
-                .send_message(&session.token, conversation, text.as_bytes())
-                .await?;
+            let chat = Chat::open(client, session, &cli.state_file)?;
+            let id = chat.send_text(conversation, text).await?;
             println!("sent {id}");
         }
         Command::Recv { once, timeout } => {
             let session = load_session(&cli.state_file, base)?;
+            let chat = Chat::open(client, session, &cli.state_file)?;
             recv(
-                &session,
+                &chat.session,
                 &RecvOptions {
                     once: *once,
                     timeout_secs: *timeout,
                 },
+                |conversation, sender, payload| chat.interpret(conversation, sender, payload),
                 |line| println!("{line}"),
             )
             .await?;
+        }
+        Command::Add {
+            conversation,
+            members,
+        } => {
+            let session = load_session(&cli.state_file, base)?;
+            let chat = Chat::open(client, session, &cli.state_file)?;
+            let list = parse_member_list(members)?;
+            chat.add_members(conversation, &list).await?;
+            println!("added {}", list.join(", "));
+        }
+        Command::Remove {
+            conversation,
+            member,
+        } => {
+            let session = load_session(&cli.state_file, base)?;
+            let chat = Chat::open(client, session, &cli.state_file)?;
+            chat.remove_member(conversation, member).await?;
+            println!("removed {member}");
+        }
+        Command::Sync => {
+            let session = load_session(&cli.state_file, base)?;
+            let chat = Chat::open(client, session, &cli.state_file)?;
+            chat.sync().await?;
+            println!("synced");
         }
         Command::Whoami => {
             let session = load_session(&cli.state_file, base)?;
@@ -145,4 +184,18 @@ async fn run(cli: &Cli, base: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Parse the comma-separated member list.
+fn parse_member_list(members: &str) -> Result<Vec<String>, String> {
+    let list: Vec<String> = members
+        .split(',')
+        .map(str::trim)
+        .filter(|member| !member.is_empty())
+        .map(str::to_string)
+        .collect();
+    if list.is_empty() {
+        return Err("no members given".to_string());
+    }
+    Ok(list)
 }
