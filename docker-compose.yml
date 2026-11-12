@@ -1,0 +1,31 @@
+services:
+  thrum:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - thrum-data:/data
+    environment:
+      # SQLite by default. For PostgreSQL use the "postgres" profile and
+      # uncomment:
+      # THRUM_DB: postgres://thrum:thrum@postgres:5432/thrum
+      THRUM_BLOB_BACKEND: disk
+    restart: unless-stopped
+
+  # Optional: `docker compose --profile postgres up -d` switches the
+  # server to PostgreSQL. The database lives in a named volume; the
+  # credentials below are for the private compose network only.
+  postgres:
+    image: postgres:17
+    profiles: ["postgres"]
+    environment:
+      POSTGRES_USER: thrum
+      POSTGRES_PASSWORD: thrum
+      POSTGRES_DB: thrum
+    volumes:
+      - thrum-postgres:/var/lib/postgresql/data
+    restart: unless-stopped
+
+volumes:
+  thrum-data:
+  thrum-postgres:

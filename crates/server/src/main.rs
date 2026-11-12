@@ -1,6 +1,7 @@
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 
 use tokio::net::TcpListener;
+use tower_http::services::{ServeDir, ServeFile};
 
 use thrum_server::config::Config;
 use thrum_server::routes::ws::spawn_sweeper;
@@ -19,14 +20,37 @@ async fn main() {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(8080);
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    let bind: IpAddr = match std::env::var("THRUM_BIND") {
+        Ok(value) => value
+            .parse()
+            .unwrap_or_else(|error| panic!("bad THRUM_BIND {value:?}: {error}")),
+        Err(_) => IpAddr::from([0, 0, 0, 0]),
+    };
+    let addr = SocketAddr::new(bind, port);
     let listener = TcpListener::bind(addr)
         .await
         .unwrap_or_else(|error| panic!("failed to bind {addr}: {error}"));
+
+    // THRUM_WEB_DIR serves the built web client from the same origin, so
+    // a small self-hosted install needs no reverse proxy: the web client
+    // talks to `window.location.origin` by default. API routes take
+    // precedence; everything else falls back to index.html (SPA routing).
+    let router = match std::env::var("THRUM_WEB_DIR") {
+        Ok(web_dir) => {
+            let index = std::path::Path::new(&web_dir).join("index.html");
+            thrum_server::build_router(state).fallback_service(
+                ServeDir::new(&web_dir)
+                    .append_index_html_on_directories(true)
+                    .fallback(ServeFile::new(index)),
+            )
+        }
+        Err(_) => thrum_server::build_router(state),
+    };
+
     println!("thrum-server listening on {addr}");
     axum::serve(
         listener,
-        thrum_server::build_router(state).into_make_service_with_connect_info::<SocketAddr>(),
+        router.into_make_service_with_connect_info::<SocketAddr>(),
     )
     .await
     .unwrap_or_else(|error| panic!("server error: {error}"));
