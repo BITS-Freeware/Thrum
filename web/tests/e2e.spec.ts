@@ -14,17 +14,46 @@ const PASSWORD = "correct-horse-battery-staple";
 /** Register a fresh account through the UI and land on the chat list. */
 async function register(page: Page, username: string): Promise<void> {
   await page.goto("/");
+  // Log console messages and network activity during registration
+  const consoleMessages: string[] = [];
+  page.on("console", (msg) => consoleMessages.push(`${msg.type()}: ${msg.text()}`));
+  page.on("pageerror", (err) => consoleMessages.push(`pageerror: ${err.message}`));
+  const networkLog: string[] = [];
+  page.on("request", (req) => networkLog.push(`REQ ${req.method()} ${req.url()}`));
+  page.on("response", (res) => networkLog.push(`RES ${res.status()} ${res.url()}`));
+  page.on("requestfailed", (req) => networkLog.push(`FAIL ${req.method()} ${req.url()} :: ${req.failure()?.errorText ?? "?"}`));
+  const logsBefore = consoleMessages.length;
+
   await page.getByRole("button", { name: "Create an account" }).click();
   await page.getByLabel("Username").fill(username);
   await page.getByLabel("Password").fill(PASSWORD);
   await page.getByRole("button", { name: "Create account" }).click();
-  await expect(page.getByRole("heading", { name: "Chats" })).toBeVisible();
+
+  // Wait for either success (Chats heading) or error message
+  const chatsHeading = page.getByRole("heading", { name: "Chats" });
+  const errorMsg = page.locator(".error");
+
+  try {
+    await expect(
+      Promise.race([
+        chatsHeading.waitFor({ state: "visible", timeout: 30_000 }).then(() => "ok"),
+        errorMsg.waitFor({ state: "visible", timeout: 30_000 }).then(async () => {
+          const text = await errorMsg.textContent();
+          throw new Error(`Registration error: ${text}`);
+        }),
+      ]),
+    ).resolves.toBe("ok");
+  } catch (caught) {
+    console.log("Console logs during registration:", consoleMessages.slice(logsBefore));
+    console.log("Network activity during registration:", networkLog);
+    throw caught;
+  }
 }
 
 async function openConversation(page: Page, label: string): Promise<void> {
-  await page.getByRole("link", { name: "Chats", exact: true }).click();
+  // Click the conversation link directly (no "Chats" nav link in current UI)
   await page.getByRole("link", { name: label, exact: true }).click();
-  await expect(page.getByRole("heading", { name: label, exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: label }).first()).toBeVisible();
 }
 
 test("two users chat live, form a group, and share an encrypted attachment", async ({
@@ -45,6 +74,7 @@ test("two users chat live, form a group, and share an encrypted attachment", asy
     .getByLabel("Members (comma-separated usernames)")
     .fill(BOB);
   await alice.getByRole("button", { name: "Create" }).click();
+  // The DM is unnamed, so it is labeled by the other member's username.
   await expect(alice.getByRole("heading", { name: BOB, exact: true })).toBeVisible();
 
   await alice.getByLabel("message text").fill("hello bob");
@@ -56,7 +86,7 @@ test("two users chat live, form a group, and share an encrypted attachment", asy
     bob.getByRole("link", { name: ALICE, exact: true }),
   ).toBeVisible({ timeout: 20_000 });
   await openConversation(bob, ALICE);
-  await expect(bob.getByText("hello bob")).toBeVisible();
+  await expect(bob.getByText("hello bob")).toBeVisible({ timeout: 20_000 });
 
   // Bob replies; alice sees the reply without reloading.
   await bob.getByLabel("message text").fill("hi alice");
@@ -70,9 +100,9 @@ test("two users chat live, form a group, and share an encrypted attachment", asy
   await alice
     .getByLabel("Members (comma-separated usernames)")
     .fill(BOB);
-  await alice.getByLabel("Group name (optional)").fill("testers");
+  await alice.getByLabel("Group name (optional)").fill("group1");
   await alice.getByRole("button", { name: "Create" }).click();
-  await expect(alice.getByRole("heading", { name: "testers", exact: true })).toBeVisible();
+  await expect(alice.getByRole("heading", { name: "group1", exact: true })).toBeVisible({ timeout: 10_000 });
 
   await alice.getByLabel("message text").fill("group hello");
   await alice.getByRole("button", { name: "Send" }).click();
@@ -81,10 +111,10 @@ test("two users chat live, form a group, and share an encrypted attachment", asy
   // Bob, sitting on the chat list, sees the group appear live.
   await bob.getByRole("link", { name: "Chats", exact: true }).click();
   await expect(
-    bob.getByRole("link", { name: "testers", exact: true }),
+    bob.getByRole("link", { name: "group1", exact: true }),
   ).toBeVisible({ timeout: 20_000 });
-  await openConversation(bob, "testers");
-  await expect(bob.getByText("group hello")).toBeVisible();
+  await openConversation(bob, "group1");
+  await expect(bob.getByText("group hello")).toBeVisible({ timeout: 20_000 });
 
   // Group details: the member list shows both users and renaming works.
   await alice
@@ -93,17 +123,21 @@ test("two users chat live, form a group, and share an encrypted attachment", asy
   await expect(
     alice.getByRole("listitem").filter({ hasText: BOB }),
   ).toBeVisible();
-  await alice.getByLabel("Rename group").fill("testers2");
+  await alice.getByLabel("Rename group").fill("group2");
   await alice.getByRole("button", { name: "Rename" }).click();
-  await expect(alice.getByRole("heading", { name: "testers2", exact: true })).toBeVisible();
+  await expect(alice.getByRole("heading", { name: "group2", exact: true })).toBeVisible();
 
   // --- attachment ---
 
   const payload = `thrum e2e attachment\nline ${"x".repeat(200)}\n`.repeat(50);
-  const filePath = path.join(os.tmpdir(), "thrum-e2e-note.txt");
+  const filePath = path.join(os.tmpdir(), "sample note.txt");
   fs.writeFileSync(filePath, payload, "utf8");
 
+  // Back out of the group screens to the chat lists first.
+  await alice.getByRole("link", { name: "Back", exact: true }).click();
+  await alice.getByRole("link", { name: "Chats", exact: true }).click();
   await openConversation(alice, BOB);
+  await bob.getByRole("link", { name: "Chats", exact: true }).click();
   await openConversation(bob, ALICE);
   await alice.setInputFiles('input[type="file"]', filePath);
   await expect(

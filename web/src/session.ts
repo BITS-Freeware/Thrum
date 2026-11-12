@@ -468,7 +468,10 @@ export class CryptoSession {
 
   /**
    * Handle one WebSocket server frame. Returns the ack'd message id when
-   * the frame was a message (the caller must send the ack), or null.
+   * the frame was a message that was fully applied (the caller must send
+   * the ack), or null when there is nothing to ack — including messages
+   * that could not be applied yet, which the server will offer again on
+   * the next connection.
    */
   async handleServerFrame(text: string): Promise<string | null> {
     const frame = decodeServerFrame(text) as unknown as
@@ -483,13 +486,13 @@ export class CryptoSession {
           created_at: number;
         };
     if (frame.type === "message") {
-      await this.interpret(
+      const applied = await this.interpret(
         frame.conversation_id,
         frame.message_id,
         frame.sender_username,
         decodePayload(frame.payload_base64),
       );
-      return frame.message_id;
+      return applied ? frame.message_id : null;
     }
     return null;
   }
@@ -502,29 +505,44 @@ export class CryptoSession {
 
   /**
    * Turn one relay payload into store updates. Mirrors the CLI's
-   * `interpret`/`apply_app_message`.
+   * `interpret`/`apply_app_message`. Returns whether the frame was fully
+   * applied and may be ack'd; false leaves it queued on the server for
+   * re-delivery after the next reconnect.
    */
   private async interpret(
     conversationId: string,
     messageId: string,
     sender: string,
     payload: Uint8Array,
-  ): Promise<void> {
+  ): Promise<boolean> {
     if (!this.device) throw new Error("not logged in");
     const envelope = (await decodeEnvelope(payload)) as unknown as
       | { kind: "mls" | "welcome"; data: Uint8Array }
       | null;
-    if (!envelope) return;
+    if (!envelope) {
+      // Undecodable payload. Not acking keeps it on the server so a
+      // later connection can try again with fresher state.
+      console.warn("message", messageId, "has an undecodable envelope");
+      return false;
+    }
     if (envelope.kind === "welcome") {
       try {
         this.device.process_welcome(envelope.data);
         await this.persist();
-      } catch {
+      } catch (error) {
         // Stale or foreign welcome; ignore like the CLI does.
+        console.warn("welcome rejected", error);
       }
       await this.ensureConversationKnown(conversationId);
       this.notify();
-      return;
+      return true;
+    }
+    if (!this.device.has_group(conversationId)) {
+      // The group has not joined this device yet (its welcome is still
+      // in flight). Leave the message queued; the next connection will
+      // offer it again once the welcome has been applied.
+      console.warn("message", messageId, "arrived before its group; leaving un-acked");
+      return false;
     }
     let incoming: { kind: string; sender?: string; payload?: Uint8Array };
     try {
@@ -532,19 +550,23 @@ export class CryptoSession {
         conversationId,
         envelope.data,
       )) as unknown as { kind: string; sender?: string; payload?: Uint8Array };
-    } catch {
-      return; // not for this device
+    } catch (error) {
+      // The device has the group but could not apply this message;
+      // re-delivery after a reconnect may succeed with fresher state.
+      console.warn("message", messageId, "could not be applied", error);
+      return false;
     }
     if (incoming.kind === "commit") {
       await this.persist();
       this.notify();
-      return;
+      return true;
     }
-    if (incoming.kind !== "application" || !incoming.payload) return;
+    if (incoming.kind !== "application" || !incoming.payload) return true;
     const app = (await decodeAppMessage(incoming.payload)) as unknown as Record<string, unknown>;
     await this.applyAppMessage(conversationId, messageId, incoming.sender ?? sender, app);
     await this.ensureConversationKnown(conversationId);
     this.notify();
+    return true;
   }
 
   /** Apply a decrypted application message to the local store. */

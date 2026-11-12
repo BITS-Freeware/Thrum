@@ -86,6 +86,7 @@ async function withStore<T>(
     }
     tx.oncomplete = () => {
       if (request && "result" in request) resolve(request.result);
+      else resolve(undefined as T);
     };
     tx.onerror = () => reject(tx.error);
     tx.onabort = () => reject(tx.error);
