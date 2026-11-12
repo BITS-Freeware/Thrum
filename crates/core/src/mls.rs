@@ -8,6 +8,7 @@
 //! module serializes to and from a client-side state directory.
 
 use std::collections::BTreeMap;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 
 use openmls::prelude::*;
@@ -107,6 +108,13 @@ struct StoredStorage {
     values: BTreeMap<String, String>,
 }
 
+/// What [`DeviceCrypto::to_json`] writes and [`DeviceCrypto::from_json`] reads.
+#[derive(Serialize, Deserialize)]
+struct Stored {
+    identity: StoredIdentity,
+    storage: StoredStorage,
+}
+
 impl DeviceCrypto {
     /// Generate fresh key material for a new device identity
     /// (`username#device-id`).
@@ -137,7 +145,49 @@ impl DeviceCrypto {
             .map_or(self.identity.as_str(), |(u, _)| u)
     }
 
+    /// Serialize the key store and identity to a JSON string. This is what a
+    /// client stores privately (a file on disk for the CLI, IndexedDB for the
+    /// web client); it contains every private key of the device.
+    pub fn to_json(&self) -> Result<String, MlsError> {
+        let mut storage = StoredStorage::default();
+        for (key, value) in self.provider.storage().values.read().unwrap().iter() {
+            storage
+                .values
+                .insert(base64_encode(key), base64_encode(value));
+        }
+        serde_json::to_string(&Stored {
+            identity: StoredIdentity {
+                identity: self.identity.clone(),
+                signer: self.signer.clone(),
+                credential_with_key: self.credential_with_key.clone(),
+            },
+            storage,
+        })
+        .map_err(MlsError::from)
+    }
+
+    /// Reconstruct a device from [`DeviceCrypto::to_json`] output.
+    pub fn from_json(json: &str) -> Result<Self, MlsError> {
+        let stored: Stored = serde_json::from_str(json).map_err(other)?;
+        let provider = OpenMlsRustCrypto::default();
+        {
+            let mut values = provider.storage().values.write().unwrap();
+            for (key, value) in stored.storage.values {
+                let key = base64_decode(&key).map_err(other)?;
+                let value = base64_decode(&value).map_err(other)?;
+                values.insert(key, value);
+            }
+        }
+        Ok(Self {
+            provider,
+            signer: stored.identity.signer,
+            credential_with_key: stored.identity.credential_with_key,
+            identity: stored.identity.identity,
+        })
+    }
+
     /// Save the key store and identity to a directory (0700/0600 on unix).
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn save(&self, dir: &Path) -> Result<(), MlsError> {
         std::fs::create_dir_all(dir).map_err(MlsError::Io)?;
         #[cfg(unix)]
@@ -145,26 +195,22 @@ impl DeviceCrypto {
             use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
         }
-        let mut storage = StoredStorage::default();
-        for (key, value) in self.provider.storage().values.read().unwrap().iter() {
-            storage
-                .values
-                .insert(base64_encode(key), base64_encode(value));
-        }
-        write_private(&dir.join("storage.json"), &serde_json::to_vec(&storage)?)?;
-        write_private(
-            &dir.join("identity.json"),
-            &serde_json::to_vec(&StoredIdentity {
-                identity: self.identity.clone(),
-                signer: self.signer.clone(),
-                credential_with_key: self.credential_with_key.clone(),
-            })?,
-        )?;
-        Ok(())
+        write_private(&dir.join("state.json"), self.to_json()?.as_bytes())
     }
 
-    /// Load the key store and identity from a directory.
+    /// Load the key store and identity from a directory. Reads the single
+    /// `state.json`; older state directories with `identity.json` and
+    /// `storage.json` still load.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn load(dir: &Path) -> Result<Self, MlsError> {
+        let state_path = dir.join("state.json");
+        if state_path.exists() {
+            let json = read_private(&state_path)?;
+            let text =
+                String::from_utf8(json).map_err(|_| MlsError::Other("bad state json".into()))?;
+            return Self::from_json(&text);
+        }
+        // Legacy layout: two separate files.
         let identity: StoredIdentity =
             serde_json::from_slice(&read_private(&dir.join("identity.json"))?).map_err(other)?;
         let storage: StoredStorage =
@@ -397,6 +443,7 @@ fn join_config() -> MlsGroupJoinConfig {
 const MAX_PAST_EPOCHS: usize = 10;
 
 /// Write bytes with 0600 permissions on unix.
+#[cfg(not(target_arch = "wasm32"))]
 fn write_private(path: &Path, bytes: &[u8]) -> Result<(), MlsError> {
     use std::io::Write;
     let mut file = std::fs::File::create(path).map_err(MlsError::Io)?;
@@ -411,6 +458,7 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<(), MlsError> {
 }
 
 /// Read bytes from a state file.
+#[cfg(not(target_arch = "wasm32"))]
 fn read_private(path: &Path) -> Result<Vec<u8>, MlsError> {
     std::fs::read(path).map_err(MlsError::Io)
 }
