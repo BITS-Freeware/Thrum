@@ -31,7 +31,7 @@ fn array(bytes: &[u8]) -> Uint8Array {
 fn object(entries: &[(&str, JsValue)]) -> Result<JsValue, JsValue> {
     let object = js_sys::Object::new();
     for (key, value) in entries {
-        js_sys::Reflect::set(&object, &(*key).into(), value).map_err(|error| error)?;
+        js_sys::Reflect::set(&object, &(*key).into(), value)?;
     }
     Ok(object.into())
 }
@@ -177,7 +177,6 @@ impl DeviceState {
 }
 
 /// Output of `add_members` is built inline; no struct needed.
-
 /// Generate fresh key material for a new device identity
 /// (`username#device-id`).
 #[wasm_bindgen]
@@ -196,7 +195,7 @@ pub fn device_from_json(json: &str) -> Result<DeviceState, JsValue> {
 }
 
 /// Generate a fresh per-file key and nonce as
-/// `{ keyBase64, nonceBase64 }`, ready to travel inside an
+/// `{ key_base64, nonce_base64 }`, ready to travel inside an
 /// `AppMessage::Attachment`.
 #[wasm_bindgen(js_name = newFileKey)]
 pub fn new_file_key() -> Result<JsValue, JsValue> {
