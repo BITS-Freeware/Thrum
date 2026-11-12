@@ -22,6 +22,8 @@ pub fn routes(state: AppState) -> Router {
         .route("/v1/accounts", post(accounts::register))
         .route("/v1/sessions", post(accounts::login))
         .route("/v1/sessions/current", delete(accounts::logout))
+        .route("/v1/account/export", get(accounts::export))
+        .route("/v1/account", delete(accounts::delete_account))
         .route("/v1/devices", get(devices::list))
         .route("/v1/devices/{device_id}", delete(devices::revoke))
         .route(

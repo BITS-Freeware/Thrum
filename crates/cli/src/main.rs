@@ -154,6 +154,20 @@ enum Command {
     Sync,
     /// Show the stored session.
     Whoami,
+    /// Download a JSON export of everything the server knows about you.
+    Export {
+        /// Where to write the JSON document; defaults to `thrum-export.json`.
+        #[arg(long, default_value = "thrum-export.json")]
+        out: PathBuf,
+    },
+    /// Permanently delete the account on this server; requires --yes.
+    DeleteAccount {
+        #[arg(long)]
+        password: String,
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 fn load_session(state_file: &std::path::Path, base: &str) -> Result<Session, String> {
@@ -351,6 +365,36 @@ async fn run(cli: &Cli, base: &str) -> Result<(), String> {
             println!(
                 "{} on {} (device {})",
                 session.username, session.server, session.device_id
+            );
+        }
+        Command::Export { out } => {
+            let session = load_session(&cli.state_file, base)?;
+            let document = client.export_account(&session.token).await?;
+            let text = serde_json::to_string_pretty(&document).unwrap();
+            std::fs::write(out, text.as_bytes())
+                .map_err(|error| format!("write failed: {error}"))?;
+            let msg_count = document["messages"]
+                .as_array()
+                .map(|a| a.len())
+                .unwrap_or(0);
+            println!(
+                "exported {} ({} message(s)) → {}",
+                document["account"]["username"],
+                msg_count,
+                out.display()
+            );
+        }
+        Command::DeleteAccount { password, yes } => {
+            if !yes {
+                return Err("refusing to delete account; use --yes to confirm".to_string());
+            }
+            let session = load_session(&cli.state_file, base)?;
+            client.delete_account(&session.token, password).await?;
+            // Remove the state file — the token is now dead.
+            std::fs::remove_file(&cli.state_file).ok(); // best effort; file may already be gone.
+            println!(
+                "account {} deleted; local session removed",
+                session.username
             );
         }
     }

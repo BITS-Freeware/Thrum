@@ -84,6 +84,20 @@ pub async fn connect(url: &str) -> sqlx::Result<(AnyPool, Backend)> {
 
     let pool = sqlx::any::AnyPoolOptions::new()
         .max_connections(8)
+        .after_connect(|conn, _meta| {
+            Box::pin(async move {
+                // SQLite defaults foreign_keys to off per connection; turn it
+                // on so ON DELETE CASCADE and REFERENCES enforcement match
+                // PostgreSQL's always-on behaviour.  WAL is already enabled
+                // once by the pool initialiser so it persists.
+                if conn.backend_name() == "SQLite" {
+                    sqlx::query("PRAGMA foreign_keys = ON")
+                        .execute(&mut *conn)
+                        .await?;
+                }
+                Ok(())
+            })
+        })
         .connect(&connect_url)
         .await?;
     if backend == Backend::Sqlite {

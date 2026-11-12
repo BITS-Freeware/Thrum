@@ -9,6 +9,7 @@ use thrum_core::UserName;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 
+use crate::account;
 use crate::accounts;
 use crate::auth;
 use crate::error::ApiError;
@@ -89,4 +90,23 @@ pub async fn logout(
         .execute(&state.db)
         .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `GET /v1/account/export`: download a JSON export of the caller's data.
+pub async fn export(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    let authed = auth::authenticate(&state, &headers).await?;
+    account::export(state, authed).await
+}
+
+/// `DELETE /v1/account`: password-confirmed account deletion.
+pub async fn delete_account(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<account::DeleteAccountBody>,
+) -> Result<StatusCode, ApiError> {
+    let authed = auth::authenticate(&state, &headers).await?;
+    account::delete_account(State(state), authed, Json(body)).await
 }

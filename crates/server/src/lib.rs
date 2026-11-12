@@ -1,5 +1,6 @@
 //! Thrum server: accounts, device registry, key packages, message relay.
 
+pub mod account;
 pub mod accounts;
 pub mod auth;
 pub mod blobs;
