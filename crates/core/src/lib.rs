@@ -4,6 +4,8 @@
 //! validation of account names, MLS group handling, message framing, and
 //! the wire protocol.
 
+pub mod envelope;
+pub mod mls;
 pub mod protocol;
 
 /// Errors returned by core operations.

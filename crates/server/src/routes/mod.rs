@@ -4,6 +4,7 @@ pub mod accounts;
 pub mod conversations;
 pub mod devices;
 pub mod keypackages;
+pub mod members;
 pub mod ws;
 
 use axum::Router;
@@ -25,6 +26,19 @@ pub fn routes(state: AppState) -> Router {
             get(keypackages::fetch),
         )
         .route("/v1/key-packages", post(keypackages::upload))
+        .route("/v1/key-packages/count", get(keypackages::count))
+        .route(
+            "/v1/users/{username}/key-package-devices",
+            get(keypackages::devices_with_key_packages),
+        )
+        .route(
+            "/v1/conversations/{conversation_id}/members",
+            post(members::add_members),
+        )
+        .route(
+            "/v1/conversations/{conversation_id}/members/{username}",
+            delete(members::remove_member),
+        )
         .route(
             "/v1/conversations",
             get(conversations::list).post(conversations::create),

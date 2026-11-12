@@ -1,8 +1,11 @@
 #![allow(dead_code)] // shared helpers; each test binary uses a subset
 
+use std::time::Duration;
+
 /// A running Geist3 server on a random loopback port.
 pub struct Server {
     pub base: String,
+    pub db_path: std::path::PathBuf,
     _dir: tempfile::TempDir,
 }
 
@@ -27,6 +30,7 @@ impl Server {
         });
         Self {
             base: format!("http://{addr}"),
+            db_path,
             _dir: dir,
         }
     }
@@ -48,4 +52,40 @@ pub fn expect_ok(output: &std::process::Output, what: &str) -> String {
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// One `recv --once` run; returns everything it printed. An empty result
+/// means nothing was delivered (or only silent control messages).
+pub fn recv_once(base: &str, state_file: &str) -> String {
+    let output = run_cli(&[
+        "--server",
+        base,
+        "--state-file",
+        state_file,
+        "recv",
+        "--once",
+        "--timeout",
+        "8",
+    ]);
+    expect_ok(&output, "recv")
+}
+
+/// Run `recv --once` repeatedly until the output contains `needle` or the
+/// tries run out. MLS handshake messages produce no output, so one exchange
+/// often takes a couple of rounds.
+pub fn recv_until(base: &str, state_file: &str, needle: &str, tries: usize) -> String {
+    let mut collected = String::new();
+    for _ in 0..tries {
+        let round = recv_once(base, state_file);
+        if round.contains(needle) {
+            return collected + &round;
+        }
+        collected.push_str(&round);
+    }
+    panic!("did not receive {needle:?} in {tries} recv rounds; got: {collected:?}");
+}
+
+/// Sleep that also yields the runtime.
+pub async fn pause(millis: u64) {
+    tokio::time::sleep(Duration::from_millis(millis)).await;
 }

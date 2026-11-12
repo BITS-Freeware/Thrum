@@ -1,6 +1,7 @@
 //! Geist3 command line client library.
 
 pub mod api;
+pub mod chat;
 pub mod session;
 pub mod ws;
 

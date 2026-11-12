@@ -115,6 +115,217 @@ impl Client {
             .ok_or_else(|| "server sent no conversation id".to_string())
     }
 
+    /// Create a conversation; returns the id and the full member list.
+    pub async fn create_conversation_with_members(
+        &self,
+        token: &str,
+        members: &[String],
+    ) -> Result<(String, Vec<String>), String> {
+        let response = self
+            .http
+            .post(format!("{}/v1/conversations", self.base))
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "members": members }))
+            .send()
+            .await
+            .map_err(|error| format!("request failed: {error}"))?;
+        let response = Self::checked(response).await?;
+        let body: Value = response
+            .json()
+            .await
+            .map_err(|error| format!("bad conversation response: {error}"))?;
+        let id = body["id"]
+            .as_str()
+            .ok_or("server sent no conversation id")?
+            .to_string();
+        let members = body["members"]
+            .as_array()
+            .map(|list| {
+                list.iter()
+                    .filter_map(|member| member.as_str().map(str::to_string))
+                    .collect()
+            })
+            .ok_or("server sent no member list")?;
+        Ok((id, members))
+    }
+
+    /// List the caller's conversations as (id, members).
+    pub async fn list_conversations(
+        &self,
+        token: &str,
+    ) -> Result<Vec<(String, Vec<String>)>, String> {
+        let response = self
+            .http
+            .get(format!("{}/v1/conversations", self.base))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|error| format!("request failed: {error}"))?;
+        let response = Self::checked(response).await?;
+        let body: Value = response
+            .json()
+            .await
+            .map_err(|error| format!("bad conversation list: {error}"))?;
+        Ok(body
+            .as_array()
+            .map(|list| {
+                list.iter()
+                    .filter_map(|entry| {
+                        let id = entry["id"].as_str()?.to_string();
+                        let members = entry["members"]
+                            .as_array()?
+                            .iter()
+                            .filter_map(|member| member.as_str().map(str::to_string))
+                            .collect();
+                        Some((id, members))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    /// Add members to a conversation; returns the new member list.
+    pub async fn add_members(
+        &self,
+        token: &str,
+        conversation_id: &str,
+        members: &[String],
+    ) -> Result<Vec<String>, String> {
+        let response = self
+            .http
+            .post(format!(
+                "{}/v1/conversations/{conversation_id}/members",
+                self.base
+            ))
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "members": members }))
+            .send()
+            .await
+            .map_err(|error| format!("request failed: {error}"))?;
+        let response = Self::checked(response).await?;
+        let body: Value = response
+            .json()
+            .await
+            .map_err(|error| format!("bad member response: {error}"))?;
+        Ok(body["members"]
+            .as_array()
+            .map(|list| {
+                list.iter()
+                    .filter_map(|member| member.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    /// Remove a member from a conversation.
+    pub async fn remove_member(
+        &self,
+        token: &str,
+        conversation_id: &str,
+        username: &str,
+    ) -> Result<(), String> {
+        let response = self
+            .http
+            .delete(format!(
+                "{}/v1/conversations/{conversation_id}/members/{username}",
+                self.base
+            ))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|error| format!("request failed: {error}"))?;
+        Self::checked(response).await.map(|_| ())
+    }
+
+    /// Device ids of a user that currently have key packages to give out.
+    pub async fn devices_with_key_packages(
+        &self,
+        token: &str,
+        username: &str,
+    ) -> Result<Vec<String>, String> {
+        let response = self
+            .http
+            .get(format!(
+                "{}/v1/users/{username}/key-package-devices",
+                self.base
+            ))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|error| format!("request failed: {error}"))?;
+        let response = Self::checked(response).await?;
+        let body: Value = response
+            .json()
+            .await
+            .map_err(|error| format!("bad device list: {error}"))?;
+        Ok(body["devices"]
+            .as_array()
+            .map(|list| {
+                list.iter()
+                    .filter_map(|device| device.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    /// Fetch and consume one key package of a device; `None` when the device
+    /// has none left.
+    pub async fn fetch_key_package(
+        &self,
+        token: &str,
+        device_id: &str,
+    ) -> Result<Option<Vec<u8>>, String> {
+        let response = self
+            .http
+            .get(format!("{}/v1/devices/{device_id}/key-package", self.base))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|error| format!("request failed: {error}"))?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let response = Self::checked(response).await?;
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|error| format!("bad key package: {error}"))?;
+        Ok(Some(bytes.to_vec()))
+    }
+
+    /// Upload one key package for the caller's device.
+    pub async fn upload_key_package(&self, token: &str, bytes: &[u8]) -> Result<(), String> {
+        let response = self
+            .http
+            .post(format!("{}/v1/key-packages", self.base))
+            .bearer_auth(token)
+            .header("content-type", "application/octet-stream")
+            .body(bytes.to_vec())
+            .send()
+            .await
+            .map_err(|error| format!("request failed: {error}"))?;
+        Self::checked(response).await.map(|_| ())
+    }
+
+    /// How many key packages the caller's device still has in stock.
+    pub async fn key_package_count(&self, token: &str) -> Result<i64, String> {
+        let response = self
+            .http
+            .get(format!("{}/v1/key-packages/count", self.base))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|error| format!("request failed: {error}"))?;
+        let response = Self::checked(response).await?;
+        let body: Value = response
+            .json()
+            .await
+            .map_err(|error| format!("bad count response: {error}"))?;
+        body["count"]
+            .as_i64()
+            .ok_or_else(|| "server sent no count".to_string())
+    }
+
     /// Send an opaque payload to a conversation; returns the message id.
     pub async fn send_message(
         &self,

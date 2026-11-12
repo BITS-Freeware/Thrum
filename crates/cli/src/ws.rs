@@ -1,10 +1,14 @@
 //! Receiving messages over the server's WebSocket.
+//!
+//! This module only transports relay frames; interpreting the opaque
+//! payloads (MLS processing) is the caller's job via the `interpret`
+//! callback. Every message is acknowledged so the server stops queueing it.
 
 use std::collections::HashSet;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
-use geist3_core::protocol::{ClientFrame, ServerFrame};
+use geist3_core::protocol::{ClientFrame, ServerFrame, decode_payload};
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::session::Session;
@@ -18,14 +22,15 @@ pub struct RecvOptions {
     pub timeout_secs: u64,
 }
 
-/// Connect to the server, authenticate, print one line per message, and
-/// acknowledge each message so the server stops queueing it.
+/// Connect to the server, authenticate, interpret one payload at a time,
+/// print what the interpreter returns, and acknowledge every message.
 ///
 /// With `once`, the call returns after the server confirms the first
 /// acknowledgement, which makes scripts and tests deterministic.
 pub async fn recv(
     session: &Session,
     options: &RecvOptions,
+    mut interpret: impl FnMut(&str, &str, &[u8]) -> Option<String>,
     mut emit: impl FnMut(String),
 ) -> Result<(), String> {
     let url = ws_url(&session.server)?;
@@ -65,10 +70,14 @@ pub async fn recv(
                         if !seen.insert(message_id.clone()) {
                             continue; // live and queued copies can overlap
                         }
-                        let text = display_text(&payload_base64);
-                        emit(format!(
-                            "message {conversation_id} {sender_username} {text}"
-                        ));
+                        if let Some(line) = interpret_payload(
+                            &mut interpret,
+                            &conversation_id,
+                            &sender_username,
+                            &payload_base64,
+                        ) {
+                            emit(line);
+                        }
                         send_frame(
                             &mut sink,
                             &ClientFrame::Ack {
@@ -92,6 +101,17 @@ pub async fn recv(
     }
 }
 
+/// Decode and interpret one base64 payload.
+fn interpret_payload(
+    interpret: &mut impl FnMut(&str, &str, &[u8]) -> Option<String>,
+    conversation_id: &str,
+    sender_username: &str,
+    payload_base64: &str,
+) -> Option<String> {
+    let payload = decode_payload(payload_base64)?;
+    interpret(conversation_id, sender_username, &payload)
+}
+
 async fn send_frame(
     sink: &mut futures_util::stream::SplitSink<
         tokio_tungstenite::WebSocketStream<
@@ -105,14 +125,6 @@ async fn send_frame(
     sink.send(Message::text(text))
         .await
         .map_err(|error| format!("websocket send failed: {error}"))
-}
-
-/// Decode a payload for display; binary payloads become a short tag.
-fn display_text(payload_base64: &str) -> String {
-    match geist3_core::protocol::decode_payload(payload_base64) {
-        Some(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-        None => format!("<undecodable {payload_base64}>"),
-    }
 }
 
 /// Turn the server base URL into its WebSocket URL.
@@ -144,5 +156,19 @@ mod tests {
             "wss://example.com/v1/ws"
         );
         assert!(ws_url("ftp://example.com").is_err());
+    }
+
+    #[test]
+    fn interpret_payload_decodes_base64() {
+        let encoded = geist3_core::protocol::encode_payload(b"plain");
+        let line = interpret_payload(
+            &mut |_conversation, _sender, payload| {
+                Some(String::from_utf8_lossy(payload).into_owned())
+            },
+            "conv",
+            "alice",
+            &encoded,
+        );
+        assert_eq!(line, Some("plain".to_string()));
     }
 }

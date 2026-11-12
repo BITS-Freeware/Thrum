@@ -1,72 +1,229 @@
-//! End-to-end test: a real server, two real CLI clients, messages both
-//! ways, including one sent while the receiver is offline.
+//! End-to-end tests over MLS: real server, real CLI processes, ciphertext
+//! on the wire and in the database.
 
 mod support;
 
-use std::process::Stdio;
-use std::time::Duration;
-
-use support::{Server, expect_ok, run_cli};
+use support::{Server, expect_ok, recv_once, recv_until, run_cli};
 
 const PASSWORD_A: &str = "correct horse alpha";
 const PASSWORD_B: &str = "correct horse bravo";
+const PASSWORD_C: &str = "correct horse charlie";
+
+/// A fresh temp directory for all CLI state of one test.
+fn state_dir() -> String {
+    let dir = std::env::temp_dir().join(format!(
+        "geist3-e2e-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    dir.to_string_lossy().into_owned()
+}
+
+fn register_and_login(base: &str, dir: &str, username: &str, password: &str) -> String {
+    expect_ok(
+        &run_cli(&[
+            "--server",
+            base,
+            "register",
+            "--username",
+            username,
+            "--password",
+            password,
+        ]),
+        "register",
+    );
+    let state_file = format!("{dir}/{username}.json");
+    expect_ok(
+        &run_cli(&[
+            "--server",
+            base,
+            "--state-file",
+            &state_file,
+            "login",
+            "--username",
+            username,
+            "--password",
+            password,
+            "--label",
+            "laptop",
+        ]),
+        "login",
+    );
+    state_file
+}
+
+/// The conversation id printed by `create`.
+fn create(base: &str, state_file: &str, members: &str) -> String {
+    let out = expect_ok(
+        &run_cli(&[
+            "--server",
+            base,
+            "--state-file",
+            state_file,
+            "create",
+            "--members",
+            members,
+        ]),
+        "create",
+    );
+    out.trim()
+        .strip_prefix("conversation ")
+        .expect("conversation id")
+        .to_string()
+}
+
+fn send(base: &str, state_file: &str, conversation: &str, text: &str) {
+    expect_ok(
+        &run_cli(&[
+            "--server",
+            base,
+            "--state-file",
+            state_file,
+            "send",
+            "--conversation",
+            conversation,
+            "--text",
+            text,
+        ]),
+        "send",
+    );
+}
 
 #[tokio::test(flavor = "multi_thread")]
-async fn two_cli_clients_exchange_messages() {
+async fn two_cli_clients_exchange_encrypted_messages() {
     let server = Server::spawn().await;
     let base = server.base.clone();
-    let dir = tempfile::tempdir().expect("temp dir");
-    let alice_state = dir.path().join("alice.json");
-    let bob_state = dir.path().join("bob.json");
-    let alice = alice_state.to_string_lossy().into_owned();
-    let bob = bob_state.to_string_lossy().into_owned();
+    let dir = state_dir();
+    let alice = register_and_login(&base, &dir, "alice", PASSWORD_A);
+    let bob = register_and_login(&base, &dir, "bob", PASSWORD_B);
 
-    expect_ok(
-        &run_cli(&[
-            "--server",
-            &base,
-            "register",
-            "--username",
-            "alice",
-            "--password",
-            PASSWORD_A,
-        ]),
-        "register alice",
-    );
-    expect_ok(
-        &run_cli(&[
-            "--server",
-            &base,
-            "register",
-            "--username",
-            "bob",
-            "--password",
-            PASSWORD_B,
-        ]),
-        "register bob",
-    );
+    let conversation = create(&base, &alice, "bob");
+
+    // Bob catches up: the welcome that joins him to the MLS group.
+    let joined = recv_until(&base, &bob, "joined", 4);
+    assert!(joined.contains(&conversation), "joined line: {joined:?}");
+
+    send(&base, &alice, &conversation, "hello bob");
+    let got = recv_until(&base, &bob, "hello bob", 4);
+    assert!(got.contains("alice: hello bob"), "got: {got:?}");
+
+    // Bob replies while alice is offline; the queue holds it.
+    send(&base, &bob, &conversation, "hello alice");
+    let got = recv_until(&base, &alice, "hello alice", 4);
+    assert!(got.contains("bob: hello alice"), "got: {got:?}");
+
+    // The server database never saw plaintext.
+    let db = std::fs::read(&server.db_path).expect("read db");
+    let db = String::from_utf8_lossy(&db).into_owned();
+    assert!(!db.contains("hello bob"), "plaintext in server db");
+    assert!(!db.contains("hello alice"), "plaintext in server db");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn added_member_cannot_read_earlier_messages() {
+    let server = Server::spawn().await;
+    let base = server.base.clone();
+    let dir = state_dir();
+    let alice = register_and_login(&base, &dir, "alice", PASSWORD_A);
+    let bob = register_and_login(&base, &dir, "bob", PASSWORD_B);
+    let carol = register_and_login(&base, &dir, "carol", PASSWORD_C);
+
+    let conversation = create(&base, &alice, "bob");
+    recv_until(&base, &bob, "joined", 4);
+    send(&base, &alice, &conversation, "the first secret");
+    recv_until(&base, &bob, "the first secret", 4);
+
+    // Carol joins now; she must not receive the earlier message.
     expect_ok(
         &run_cli(&[
             "--server",
             &base,
             "--state-file",
             &alice,
-            "login",
-            "--username",
-            "alice",
-            "--password",
-            PASSWORD_A,
-            "--label",
-            "laptop",
+            "add",
+            "--conversation",
+            &conversation,
+            "--members",
+            "carol",
         ]),
-        "login alice",
+        "add carol",
     );
+    let joined = recv_until(&base, &carol, "joined", 4);
+    assert!(joined.contains(&conversation));
+    assert!(!joined.contains("the first secret"));
+
+    send(&base, &alice, &conversation, "carol can read this");
+    let got = recv_until(&base, &carol, "carol can read this", 4);
+    assert!(got.contains("carol can read this"));
+
+    let db = std::fs::read(&server.db_path).expect("read db");
+    let db = String::from_utf8_lossy(&db).into_owned();
+    assert!(!db.contains("the first secret"), "plaintext in server db");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn removed_member_stops_receiving_messages() {
+    let server = Server::spawn().await;
+    let base = server.base.clone();
+    let dir = state_dir();
+    let alice = register_and_login(&base, &dir, "alice", PASSWORD_A);
+    let bob = register_and_login(&base, &dir, "bob", PASSWORD_B);
+
+    let conversation = create(&base, &alice, "bob");
+    recv_until(&base, &bob, "joined", 4);
+    send(&base, &alice, &conversation, "before removal");
+    recv_until(&base, &bob, "before removal", 4);
+
+    // The removal commit reaches bob while he is still a member; his next
+    // recv processes it (no output), then the server stops delivering.
     expect_ok(
         &run_cli(&[
             "--server",
             &base,
             "--state-file",
-            &bob,
+            &alice,
+            "remove",
+            "--conversation",
+            &conversation,
+            "--member",
+            "bob",
+        ]),
+        "remove bob",
+    );
+    let after = recv_once(&base, &bob);
+    assert!(!after.contains("before removal"), "no replay after removal");
+
+    send(&base, &alice, &conversation, "after removal");
+    let quiet = recv_once(&base, &bob);
+    assert!(
+        !quiet.contains("after removal"),
+        "removed member got: {quiet:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_device_joins_existing_conversations() {
+    let server = Server::spawn().await;
+    let base = server.base.clone();
+    let dir = state_dir();
+    let alice = register_and_login(&base, &dir, "alice", PASSWORD_A);
+    let bob1 = register_and_login(&base, &dir, "bob", PASSWORD_B);
+
+    let conversation = create(&base, &alice, "bob");
+    recv_until(&base, &bob1, "joined", 4);
+
+    // Bob logs in on a second device; it has no groups yet.
+    let bob2 = format!("{dir}/bob2.json");
+    expect_ok(
+        &run_cli(&[
+            "--server",
+            &base,
+            "--state-file",
+            &bob2,
             "login",
             "--username",
             "bob",
@@ -75,125 +232,19 @@ async fn two_cli_clients_exchange_messages() {
             "--label",
             "phone",
         ]),
-        "login bob",
+        "login bob2",
     );
 
-    let out = expect_ok(
-        &run_cli(&[
-            "--server",
-            &base,
-            "--state-file",
-            &alice,
-            "create",
-            "--members",
-            "bob",
-        ]),
-        "create conversation",
-    );
-    let conversation = out
-        .trim()
-        .strip_prefix("conversation ")
-        .expect("conversation id")
-        .to_string();
-
-    // Bob starts listening; alice sends. Whether bob is already connected
-    // or still connecting, the server must deliver the message.
-    let bob_child = spawn_recv(&base, &bob);
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    let sent = expect_ok(
-        &run_cli(&[
-            "--server",
-            &base,
-            "--state-file",
-            &alice,
-            "send",
-            "--conversation",
-            &conversation,
-            "--text",
-            "hello bob",
-        ]),
-        "alice sends",
-    );
-    assert!(sent.starts_with("sent "), "send output: {sent:?}");
-    let bob_output = wait_for(bob_child).await;
-    assert!(
-        bob_output.contains("hello bob"),
-        "bob should receive the message, got: {bob_output:?}"
-    );
-
-    // Bob is offline now. This message must wait in the queue.
+    // Bob's first device runs sync, which adds the new device to the group.
     expect_ok(
-        &run_cli(&[
-            "--server",
-            &base,
-            "--state-file",
-            &alice,
-            "send",
-            "--conversation",
-            &conversation,
-            "--text",
-            "second for bob",
-        ]),
-        "alice sends while bob is offline",
+        &run_cli(&["--server", &base, "--state-file", &bob1, "sync"]),
+        "sync",
     );
-    let bob_output = recv_once(&base, &bob).await;
-    assert!(
-        bob_output.contains("second for bob"),
-        "queued message must be delivered on reconnect, got: {bob_output:?}"
-    );
+    let joined = recv_until(&base, &bob2, "joined", 4);
+    assert!(joined.contains(&conversation));
 
-    // Bob replies while alice has never been connected at all.
-    expect_ok(
-        &run_cli(&[
-            "--server",
-            &base,
-            "--state-file",
-            &bob,
-            "send",
-            "--conversation",
-            &conversation,
-            "--text",
-            "hello alice",
-        ]),
-        "bob sends",
-    );
-    let alice_output = recv_once(&base, &alice).await;
-    assert!(
-        alice_output.contains("hello alice"),
-        "alice should receive the reply, got: {alice_output:?}"
-    );
-}
-
-/// Spawn `geist3 recv --once` with captured stdout.
-fn spawn_recv(base: &str, state_file: &str) -> tokio::process::Child {
-    tokio::process::Command::new(env!("CARGO_BIN_EXE_geist3"))
-        .args([
-            "--server",
-            base,
-            "--state-file",
-            state_file,
-            "recv",
-            "--once",
-            "--timeout",
-            "20",
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn recv")
-}
-
-/// Wait for a spawned recv to finish and return its stdout.
-async fn wait_for(child: tokio::process::Child) -> String {
-    let output = tokio::time::timeout(Duration::from_secs(30), child.wait_with_output())
-        .await
-        .expect("recv finishes in time")
-        .expect("wait for recv");
-    String::from_utf8_lossy(&output.stdout).into_owned()
-}
-
-/// Run `geist3 recv --once` to completion and return its stdout.
-async fn recv_once(base: &str, state_file: &str) -> String {
-    let child = spawn_recv(base, state_file);
-    wait_for(child).await
+    // Now alice's message reaches the second device too.
+    send(&base, &alice, &conversation, "for both devices");
+    let got = recv_until(&base, &bob2, "for both devices", 4);
+    assert!(got.contains("alice: for both devices"));
 }

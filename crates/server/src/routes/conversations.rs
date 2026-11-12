@@ -131,7 +131,7 @@ pub async fn send_message(
 }
 
 /// Canonical member usernames of one conversation, sorted.
-async fn conversation_members(
+pub(crate) async fn conversation_members(
     db: &sqlx::SqlitePool,
     conversation_id: &str,
 ) -> Result<Vec<String>, ApiError> {
