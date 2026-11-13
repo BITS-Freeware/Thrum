@@ -1,0 +1,7 @@
+artifacts/
+coverage/
+crash-*
+timeout-*
+oom-*
+libfuzzer.*
+target/

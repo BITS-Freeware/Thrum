@@ -15,6 +15,31 @@ CI runs exactly these on every push and pull request, plus the web build and
 browser tests once they exist (M6 onward). Please run them locally before
 pushing.
 
+## Fuzzing
+
+Every parser that reads data from the network is fuzz-tested; the inventory
+and the reasoning live in `docs/decisions/0011-fuzz-testing.md`. Two layers:
+
+1. **In CI** — `cargo test` includes `crates/{core,server,cli}/tests/fuzz.rs`:
+   thousands of deterministic random and mutated inputs per parser, checking
+   that parsing is total (no panics) and that MLS group state survives
+   garbage. These run everywhere, no extra setup.
+2. **Coverage-guided, locally** — libFuzzer targets under `fuzz/` (a separate
+   crate, nightly toolchain):
+
+   ```sh
+   cargo install cargo-fuzz
+   cd fuzz
+   cargo +nightly fuzz run envelope       # also: app_message, frames,
+   cargo +nightly fuzz run mls_process    #       names
+   ```
+
+   Runs are not timed in CI; run them for a few minutes before touching a
+   parser. Any crash input lands in `fuzz/artifacts/` and should become a
+   regression test in the stable layer.
+
+When you add a network-facing parser, add a target in both layers.
+
 ## Project layout
 
 - `crates/core` — protocol types and client logic, no I/O.
