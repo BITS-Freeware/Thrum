@@ -155,3 +155,36 @@ pub async fn login(
         username: name.as_str().to_string(),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Passwords must be stored as Argon2id PHC strings (threat model,
+    /// curious server operator): a database leak must not hand out
+    /// reversible or weakly hashed passwords.
+    #[test]
+    fn password_hashes_are_argon2id() {
+        let hash = hash_password("correct horse battery staple").expect("hash");
+        let parsed = PasswordHash::new(&hash).expect("parseable PHC string");
+        assert_eq!(
+            parsed.algorithm.as_str(),
+            "argon2id",
+            "stored hash must be argon2id, got {hash}"
+        );
+        verify_password("correct horse battery staple", &parsed).expect("verifies");
+        assert!(verify_password("wrong password", &parsed).is_err());
+        // Two hashes of the same password must not share a salt.
+        let other = hash_password("correct horse battery staple").expect("hash");
+        assert_ne!(hash, other, "salts must differ");
+    }
+
+    /// The dummy hash used for unknown usernames must be an Argon2id PHC
+    /// string too, so the timing path is the same as a real login.
+    #[test]
+    fn dummy_hash_is_a_real_argon2id_string() {
+        let parsed = PasswordHash::new(dummy_hash()).expect("parseable PHC string");
+        assert_eq!(parsed.algorithm.as_str(), "argon2id");
+        assert!(verify_password("anything", &parsed).is_err());
+    }
+}

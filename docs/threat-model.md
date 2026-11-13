@@ -31,19 +31,29 @@ Runs the server and reads everything it stores and relays.
   offline queue, but a malicious server can always censor.)*
 - Can serve a stale or wrong key package when a client fetches one, which
   could steer a group commit toward an attacker-controlled device. Clients
-  must verify that a fetched key package's credential identity matches the
-  account it intends to add. *(mitigation: enforced in the client add flow,
-  M3; test added there.)*
+  only enter a fetched package into a commit when its credential identity
+  is the device that was asked for. *(mitigation: enforced in the add flow
+  of both clients, M3; the check is unit-tested against a swapped package.)*
 - Can try to guess passwords offline after a database leak: passwords are
-  hashed with Argon2id. *(mitigation: M1, tested there.)*
+  stored as Argon2id PHC strings with per-user salts, and unknown-name
+  logins burn time on a dummy hash. *(mitigation: M1; hash format, verify
+  and salting unit-tested in the accounts module.)*
 
 ### 2. Network attacker
 
 On the path between client and server.
 
-- Cannot read or tamper with traffic: HTTPS is required for all non-local
-  clients, and WebSocket runs over TLS. *(mitigation: deployment guide, M7;
-  local plain HTTP is allowed only on loopback for development.)*
+- Cannot read or tamper with traffic in a correct deployment: the server
+  speaks plain HTTP, and the deployment guide requires a TLS-terminating
+  reverse proxy for anything reachable from the internet. *(mitigation:
+  documented in the self-hosting guide, M7. Limitation: TLS is an
+  operational requirement, not enforced in code; a misconfigured operator
+  can still serve plain HTTP on a public interface.)*
+- Cannot crash clients or the server with malformed protocol input:
+  envelope, frame, payload, attachment-name and MLS parsing are total —
+  garbage becomes a typed error or a silent drop, and a device's MLS
+  state survives arbitrary junk. *(mitigation and tests: fuzz layer of
+  M7, decision 0011.)*
 - Cannot break end-to-end encryption without breaking TLS *and* the server's
   MLS group keys, which the server does not hold.
 
@@ -75,6 +85,10 @@ A legitimate member who misbehaves.
   exercised by M3 tests.)*
 - Cannot read messages sent before they were added: earlier epochs do not
   include them. *(mitigation: MLS epoch structure; tested in M3.)*
+- Cannot crash other members by feeding them malformed MLS material
+  (commits, welcomes, key packages): all of it is parsed behind the M7
+  panic guard and fuzz layer, and a failed parse leaves the device's
+  group state untouched. *(mitigation: decision 0011; tested there.)*
 
 ## Out of scope in 0.1.0
 
