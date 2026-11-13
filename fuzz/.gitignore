@@ -1,5 +1,6 @@
 artifacts/
 coverage/
+corpus/
 crash-*
 timeout-*
 oom-*
