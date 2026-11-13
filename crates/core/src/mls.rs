@@ -60,6 +60,32 @@ fn other<E: std::fmt::Display>(error: E) -> MlsError {
     MlsError::Other(error.to_string())
 }
 
+/// Run an OpenMLS parse over attacker-controllable bytes behind a panic
+/// guard.
+///
+/// The TLS-codec layer under OpenMLS asserts on some malformed length
+/// prefixes instead of returning an error (for example a vector length
+/// larger than the remaining input). Every byte sequence handed to
+/// [`key_package_identity`](DeviceCrypto::key_package_identity),
+/// [`add_members`](DeviceCrypto::add_members),
+/// [`process_incoming`](DeviceCrypto::process_incoming) and
+/// [`process_welcome`](DeviceCrypto::process_welcome) can come from
+/// another user or from the server, so such an assert would be a remote
+/// crash. These guards only ever wrap parsing and validation, which
+/// happen before any group state is touched: a caught panic leaves the
+/// device intact and surfaces as a typed error. Panics from later,
+/// already-validated steps stay loud, as they would be genuine bugs.
+fn guard_panics<T>(work: impl FnOnce() -> Result<T, MlsError>) -> Result<T, MlsError> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).unwrap_or_else(|panic| {
+        let detail = panic
+            .downcast_ref::<&'static str>()
+            .map(|text| (*text).to_string())
+            .or_else(|| panic.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "unparseable MLS input".to_string());
+        Err(MlsError::Other(format!("malformed MLS input: {detail}")))
+    })
+}
+
 /// A MLS group member as Geist3 sees it: the credential identity string.
 pub fn member_identity(credential: &Credential) -> Result<String, MlsError> {
     if credential.credential_type() != CredentialType::Basic {
@@ -237,10 +263,12 @@ impl DeviceCrypto {
     /// they meant to add before using the package, so a malicious server
     /// cannot steer a commit toward a device it controls.
     pub fn key_package_identity(&self, package: &[u8]) -> Result<String, MlsError> {
-        let key_package = KeyPackageIn::tls_deserialize_exact_bytes(package)
-            .map_err(other)?
-            .validate(self.provider.crypto(), ProtocolVersion::Mls10)
-            .map_err(other)?;
+        let key_package = guard_panics(|| {
+            KeyPackageIn::tls_deserialize_exact_bytes(package)
+                .map_err(other)?
+                .validate(self.provider.crypto(), ProtocolVersion::Mls10)
+                .map_err(other)
+        })?;
         let credential = key_package.leaf_node().credential();
         member_identity(credential)
     }
@@ -300,10 +328,12 @@ impl DeviceCrypto {
         let packages: Vec<KeyPackage> = key_packages
             .iter()
             .map(|bytes| {
-                KeyPackageIn::tls_deserialize_exact_bytes(bytes)
-                    .map_err(other)?
-                    .validate(self.provider.crypto(), ProtocolVersion::Mls10)
-                    .map_err(other)
+                guard_panics(|| {
+                    KeyPackageIn::tls_deserialize_exact_bytes(bytes)
+                        .map_err(other)?
+                        .validate(self.provider.crypto(), ProtocolVersion::Mls10)
+                        .map_err(other)
+                })
             })
             .collect::<Result<_, _>>()?;
         let mut group = self.group_mut(conversation_id)?;
@@ -365,8 +395,12 @@ impl DeviceCrypto {
             Some(group) => group,
             None => return Ok(Incoming::Ignored),
         };
-        let message = MlsMessageIn::tls_deserialize_exact_bytes(message).map_err(other)?;
-        let message = message.try_into_protocol_message().map_err(other)?;
+        let message = guard_panics(|| {
+            MlsMessageIn::tls_deserialize_exact_bytes(message)
+                .map_err(other)?
+                .try_into_protocol_message()
+                .map_err(other)
+        })?;
         let processed = match group.process_message(&self.provider, message) {
             Ok(processed) => processed,
             Err(_) => return Ok(Incoming::Ignored),
@@ -397,16 +431,18 @@ impl DeviceCrypto {
     /// conversation id. Errors when the welcome is not for this device (the
     /// key package it encrypts to is unknown here) or is stale.
     pub fn process_welcome(&self, welcome_bytes: &[u8]) -> Result<String, MlsError> {
-        let welcome = Welcome::tls_deserialize_exact_bytes(welcome_bytes).map_err(other)?;
-        let staged = StagedWelcome::new_from_welcome(
-            &self.provider,
-            &join_config(),
-            welcome,
-            None, // the ratchet tree arrives inside the welcome
-        )
-        .map_err(other)?;
-        let group = staged.into_group(&self.provider).map_err(other)?;
-        Ok(String::from_utf8_lossy(group.group_id().as_slice()).into_owned())
+        guard_panics(|| {
+            let welcome = Welcome::tls_deserialize_exact_bytes(welcome_bytes).map_err(other)?;
+            let staged = StagedWelcome::new_from_welcome(
+                &self.provider,
+                &join_config(),
+                welcome,
+                None, // the ratchet tree arrives inside the welcome
+            )
+            .map_err(other)?;
+            let group = staged.into_group(&self.provider).map_err(other)?;
+            Ok(String::from_utf8_lossy(group.group_id().as_slice()).into_owned())
+        })
     }
 
     /// The credential identities of all current group members.
