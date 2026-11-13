@@ -1064,7 +1064,7 @@ dependencies = [
 
 [[package]]
 name = "geist3-cli"
-version = "0.1.0-dev"
+version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "clap",
@@ -1085,7 +1085,7 @@ dependencies = [
 
 [[package]]
 name = "geist3-core"
-version = "0.1.0-dev"
+version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",
@@ -1103,7 +1103,7 @@ dependencies = [
 
 [[package]]
 name = "geist3-server"
-version = "0.1.0-dev"
+version = "0.1.0"
 dependencies = [
  "argon2",
  "async-trait",
@@ -1129,7 +1129,7 @@ dependencies = [
 
 [[package]]
 name = "geist3-wasm"
-version = "0.1.0-dev"
+version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "geist3-core",
