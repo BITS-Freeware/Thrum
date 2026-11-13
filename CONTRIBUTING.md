@@ -25,11 +25,11 @@ and the reasoning live in `docs/decisions/0011-fuzz-testing.md`. Two layers:
    that parsing is total (no panics) and that MLS group state survives
    garbage. These run everywhere, no extra setup.
 2. **Coverage-guided, locally** — libFuzzer targets under `fuzz/` (a separate
-   crate, nightly toolchain):
+   crate, nightly toolchain). Run from the repository root, as `cargo fuzz`
+   looks for `fuzz/Cargo.toml` relative to the working directory:
 
    ```sh
    cargo install cargo-fuzz
-   cd fuzz
    cargo +nightly fuzz run envelope       # also: app_message, frames,
    cargo +nightly fuzz run mls_process    #       names
    ```
