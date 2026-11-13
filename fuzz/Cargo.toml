@@ -8,6 +8,9 @@ edition = "2024"
 # the main workspace must not require. See docs/decisions/0011.
 [workspace]
 
+[package.metadata]
+cargo-fuzz = true
+
 [dependencies]
 geist3-core = { path = "../crates/core" }
 geist3-cli = { path = "../crates/cli" }
