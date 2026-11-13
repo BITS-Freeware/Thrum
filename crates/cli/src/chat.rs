@@ -254,18 +254,7 @@ impl Chat {
                     .fetch_key_package(&self.session.token, &device_id)
                     .await?
                 {
-                    // The server picks which bytes to hand out; the claimed
-                    // identity must be the device we asked about.
-                    let claimed = self
-                        .crypto
-                        .key_package_identity(&package)
-                        .map_err(|error| error.to_string())?;
-                    if claimed != identity {
-                        return Err(format!(
-                            "server returned a key package for {claimed} instead of {identity}"
-                        ));
-                    }
-                    packages.push(package);
+                    packages.push(checked_key_package(&self.crypto, &package, &identity)?);
                 }
             }
         }
@@ -748,4 +737,48 @@ fn new_blob_id() -> String {
 /// Encode payload bytes for tests and debugging.
 pub fn payload_to_base64(bytes: &[u8]) -> String {
     geist3_core::protocol::encode_payload(bytes)
+}
+
+/// A fetched key package may only enter a commit when it claims the
+/// identity of the device it was fetched for: the server picks which bytes
+/// to hand out, and a malicious server must not steer a commit toward a
+/// device it controls (threat model, curious server operator).
+fn checked_key_package(
+    crypto: &geist3_core::mls::DeviceCrypto,
+    package: &[u8],
+    identity: &str,
+) -> Result<Vec<u8>, String> {
+    let claimed = crypto
+        .key_package_identity(package)
+        .map_err(|error| error.to_string())?;
+    if claimed != identity {
+        return Err(format!(
+            "server returned a key package for {claimed} instead of {identity}"
+        ));
+    }
+    Ok(package.to_vec())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use geist3_core::mls::DeviceCrypto;
+
+    #[test]
+    fn a_mismatched_key_package_is_rejected() {
+        let alice = DeviceCrypto::generate("alice#device-1".to_string());
+        let bob = DeviceCrypto::generate("bob#device-1".to_string());
+        // The right pairing passes through unchanged.
+        let package = bob.new_key_package().expect("key package");
+        let checked =
+            checked_key_package(&alice, &package, "bob#device-1").expect("matching identity");
+        assert_eq!(checked, package);
+        // The same bytes offered for a different device are refused.
+        let error = checked_key_package(&alice, &package, "carol#device-1")
+            .expect_err("swapped identity must fail");
+        assert!(
+            error.contains("bob#device-1") && error.contains("carol#device-1"),
+            "error names both identities: {error}"
+        );
+    }
 }
