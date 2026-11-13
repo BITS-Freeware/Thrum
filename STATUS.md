@@ -2,9 +2,9 @@
 
 Updated after every working session.
 
-- **Current milestone:** M7 (hardening + 0.1.0)
-- **Last done:** M7.4 complete and fully gated. Fuzz layer (decision 0011): deterministic fuzz tests in `cargo test` for every network-facing parser (envelope, AppMessage, frames, base64, attachment names, OpenMLS processing) plus five libFuzzer targets under `fuzz/` — all ran clean locally (~830k execs). Fuzzing found a reachable crash: `tls_codec` asserts on over-long vector length prefixes inside `process_welcome`/`key_package_identity`; fixed with `guard_panics` at the Thrum boundary (typed error, group state untouched). Threat-model pass done: every line maps to a real test, mitigation or limitation; unit tests added for the add-flow key-package identity check and Argon2id hash storage; the TLS line was corrected to what the code enforces. CHANGELOG.md added. Full local gate identical to CI green: fmt, clippy, `cargo test` (25 test binaries), web build, Playwright e2e (1 passed). Self-hosting guide re-verified from a clean checkout at aaa3502: release build, web build, server serving the web client, two CLI users with an encrypted DM delivered over the queue. CI green on main.
-- **Next step:** tag v0.1.0 once CI is green on the final commits.
+- **Current milestone:** none — 0.1.0 tagged (c7a0d0b); roadmap complete through M7.
+- **Last done:** tagged **v0.1.0** on the CI-green release commit. M7 fully closed: fuzz layer (decision 0011, incl. the tls_codec panic guard it uncovered), threat-model pass, CHANGELOG.md, version bumps to 0.1.0, full local gate identical to CI green (fmt, clippy, cargo test 25 binaries, web build, Playwright), self-hosting guide re-verified from a clean checkout with an encrypted DM delivered, libFuzzer targets clean (~830k execs), CI green on main.
+- **Next step:** none — Thrum 0.1.0 is done and tagged.
 - **Blocked on:** nothing.
 
 ## Log
