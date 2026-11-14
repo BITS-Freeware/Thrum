@@ -1,7 +1,7 @@
 //! Conversation and message storage: fan-out, catch-up, expiry.
 
-use thrum_core::protocol::ServerFrame;
 use sqlx::AnyPool;
+use thrum_core::protocol::ServerFrame;
 use uuid::Uuid;
 
 use crate::accounts::now;

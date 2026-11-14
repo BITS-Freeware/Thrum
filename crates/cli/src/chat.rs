@@ -6,11 +6,11 @@ use std::sync::Mutex;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use rand::RngCore;
+use sha2::{Digest, Sha256};
 use thrum_core::attachment::{FileKey, KEY_LEN, NONCE_LEN};
 use thrum_core::envelope::{AppMessage, Envelope, decode_envelope, encode_envelope};
 use thrum_core::mls::{DeviceCrypto, Incoming};
-use rand::RngCore;
-use sha2::{Digest, Sha256};
 
 use crate::api::Client;
 use crate::session::Session;

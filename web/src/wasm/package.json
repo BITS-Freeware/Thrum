@@ -6,7 +6,7 @@
   "license": "AGPL-3.0-or-later",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Zyniker13/Thrum"
+    "url": "https://github.com/BITS-Freeware/Thrum"
   },
   "files": [
     "thrum_wasm_bg.wasm",

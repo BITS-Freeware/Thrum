@@ -122,8 +122,7 @@ impl S3Store {
     pub fn new(cfg: &Config) -> Result<Self, BlobError> {
         if cfg.s3_endpoint.is_empty() || cfg.s3_bucket.is_empty() || cfg.s3_region.is_empty() {
             return Err(BlobError::S3(
-                "THRUM_S3_ENDPOINT, THRUM_S3_BUCKET, and THRUM_S3_REGION must be set"
-                    .to_string(),
+                "THRUM_S3_ENDPOINT, THRUM_S3_BUCKET, and THRUM_S3_REGION must be set".to_string(),
             ));
         }
         let mut builder = object_store::aws::AmazonS3Builder::new()

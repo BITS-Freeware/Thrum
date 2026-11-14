@@ -5,14 +5,14 @@
 //! crypto, and the application-message codec. Key material never leaves the
 //! page; the caller stores [`DeviceState`] JSON in IndexedDB.
 
+use js_sys::Uint8Array;
+use serde::Serialize;
+use serde_wasm_bindgen::to_value;
 use thrum_core as core;
 use thrum_core::attachment::{FileKey, decrypt_file, encrypt_file};
 use thrum_core::envelope::AppMessage;
 use thrum_core::mls::{DeviceCrypto, Incoming};
 use thrum_core::protocol::{decode_payload, encode_payload};
-use js_sys::Uint8Array;
-use serde::Serialize;
-use serde_wasm_bindgen::to_value;
 use wasm_bindgen::prelude::*;
 
 /// Turn a JS byte array into a plain `Vec<u8>`.

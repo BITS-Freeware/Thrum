@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use common::{TestApp, login, register};
 use futures_util::{SinkExt, StreamExt};
-use thrum_core::protocol::{ClientFrame, ServerFrame};
 use serde_json::{Value, json};
+use thrum_core::protocol::{ClientFrame, ServerFrame};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 const PW: &str = "long enough password";

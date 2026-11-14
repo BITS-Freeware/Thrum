@@ -1,8 +1,8 @@
 #![no_main]
 
-use thrum_cli::files::{mime_from_name, sanitize_name, save_attachment};
 use libfuzzer_sys::fuzz_target;
 use std::path::Path;
+use thrum_cli::files::{mime_from_name, sanitize_name, save_attachment};
 
 fuzz_target!(|data: &[u8]| {
     let name = String::from_utf8_lossy(data);

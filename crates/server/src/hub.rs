@@ -1,8 +1,8 @@
 //! Live delivery hub: which devices are connected right now.
 
-use thrum_core::protocol::ServerFrame;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use thrum_core::protocol::ServerFrame;
 use tokio::sync::mpsc;
 
 /// Tracks the WebSocket connection of every authenticated device.

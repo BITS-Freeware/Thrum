@@ -1,8 +1,8 @@
 #![no_main]
 
-use thrum_core::mls::DeviceCrypto;
 use libfuzzer_sys::fuzz_target;
 use std::sync::OnceLock;
+use thrum_core::mls::DeviceCrypto;
 
 /// One device pair with a joined group, shared across inputs so the
 /// property includes "group state survives garbage".

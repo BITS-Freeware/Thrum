@@ -4,6 +4,18 @@ All notable changes to Thrum are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- **Renamed to Thrum.** Crates are now `thrum-core`,
+  `thrum-server`, `thrum-cli` and `thrum-wasm`; binaries, the web package and
+  the `x-thrum-blob-id` header follow. Release 0.1.0 used a different environment-variable prefix. Server settings use `THRUM_*`
+  environment variables. Release 0.1.0 exports used a different format string; exports now report
+  `"format": "thrum-export"`. The repository moved to
+  [BITS-Freeware/Thrum](https://github.com/BITS-Freeware/Thrum). See
+  decision 0012.
+
 ## [0.1.0] - 2026-11-13
 
 First release: a small, end-to-end-encrypted messenger with a self-hostable
@@ -61,4 +73,4 @@ protection from the server operator, no at-rest encryption of client state,
 TLS termination is an operational requirement rather than code-enforced,
 and other items listed there.
 
-[0.1.0]: https://github.com/Zyniker13/Thrum/releases/tag/v0.1.0
+[0.1.0]: https://github.com/BITS-Freeware/Thrum/releases/tag/v0.1.0

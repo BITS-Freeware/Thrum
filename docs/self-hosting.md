@@ -15,7 +15,7 @@ directory.
 ## Quick start with Docker Compose
 
 ```sh
-git clone https://github.com/Zyniker13/Thrum.git
+git clone https://github.com/BITS-Freeware/Thrum.git
 cd Thrum
 docker compose up -d --build
 ```
@@ -38,7 +38,7 @@ Building needs a Rust toolchain (2024 edition) and Node 22 for the web
 client. The web client is optional; the CLI works without it.
 
 ```sh
-git clone https://github.com/Zyniker13/Thrum.git
+git clone https://github.com/BITS-Freeware/Thrum.git
 cd Thrum
 cargo build --release -p thrum-server -p thrum-cli
 

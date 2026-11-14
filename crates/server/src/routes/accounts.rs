@@ -5,9 +5,9 @@ use axum::extract::{ConnectInfo, State};
 use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use thrum_core::UserName;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
+use thrum_core::UserName;
 
 use crate::account;
 use crate::accounts;

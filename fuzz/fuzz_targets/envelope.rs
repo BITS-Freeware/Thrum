@@ -1,7 +1,7 @@
 #![no_main]
 
-use thrum_core::envelope::{decode_envelope, Envelope};
 use libfuzzer_sys::fuzz_target;
+use thrum_core::envelope::{Envelope, decode_envelope};
 
 fuzz_target!(|data: &[u8]| {
     if let Some(envelope) = decode_envelope(data) {

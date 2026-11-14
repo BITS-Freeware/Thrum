@@ -1,7 +1,7 @@
 #![no_main]
 
-use thrum_core::protocol::{decode_payload, ClientFrame, ServerFrame};
 use libfuzzer_sys::fuzz_target;
+use thrum_core::protocol::{ClientFrame, ServerFrame, decode_payload};
 
 fuzz_target!(|data: &[u8]| {
     let text = String::from_utf8_lossy(data);

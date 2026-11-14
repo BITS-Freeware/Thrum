@@ -1,8 +1,8 @@
 mod common;
 
 use common::{TestApp, register};
-use thrum_server::config::Config;
 use serde_json::json;
+use thrum_server::config::Config;
 
 #[tokio::test]
 async fn register_is_rate_limited() {

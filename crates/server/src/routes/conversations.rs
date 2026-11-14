@@ -6,10 +6,10 @@ use axum::extract::{Path, State};
 use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use thrum_core::UserName;
-use thrum_core::protocol::ServerFrame;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use thrum_core::UserName;
+use thrum_core::protocol::ServerFrame;
 
 use crate::auth;
 use crate::error::ApiError;
