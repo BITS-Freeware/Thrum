@@ -1,20 +1,20 @@
 [package]
-name = "geist3-cli"
+name = "thrum-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Geist3 command line client"
+description = "Thrum command line client"
 
 [[bin]]
-name = "geist3"
+name = "thrum"
 path = "src/main.rs"
 
 [dependencies]
 base64.workspace = true
 clap.workspace = true
 futures-util.workspace = true
-geist3-core.workspace = true
+thrum-core.workspace = true
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 rand.workspace = true
 reqwest.workspace = true
@@ -26,5 +26,5 @@ tokio-tungstenite.workspace = true
 url.workspace = true
 
 [dev-dependencies]
-geist3-server.workspace = true
+thrum-server.workspace = true
 tempfile.workspace = true

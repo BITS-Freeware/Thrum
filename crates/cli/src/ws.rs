@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
-use geist3_core::protocol::{ClientFrame, ServerFrame, decode_payload};
+use thrum_core::protocol::{ClientFrame, ServerFrame, decode_payload};
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::session::Session;
@@ -162,7 +162,7 @@ mod tests {
 
     #[test]
     fn interpret_payload_decodes_base64() {
-        let encoded = geist3_core::protocol::encode_payload(b"plain");
+        let encoded = thrum_core::protocol::encode_payload(b"plain");
         let line = interpret_payload(
             &mut |_conversation, _message_id, _sender, payload| {
                 Some(String::from_utf8_lossy(payload).into_owned())

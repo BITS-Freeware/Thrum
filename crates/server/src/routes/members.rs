@@ -8,8 +8,8 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
-use geist3_core::UserName;
 use serde::Deserialize;
+use thrum_core::UserName;
 
 use crate::auth;
 use crate::error::ApiError;

@@ -5,7 +5,7 @@
 //! panics. Deterministic seeded inputs mirror the stable fuzz layer in
 //! docs/decisions/0011; deep coverage-guided fuzzing lives under `fuzz/`.
 
-use geist3_server::frames::parse_client_frame;
+use thrum_server::frames::parse_client_frame;
 
 /// A tiny deterministic PRNG (xorshift64*) so fuzz runs are reproducible.
 struct Rng(u64);

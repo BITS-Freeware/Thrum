@@ -10,17 +10,17 @@ jobs:
     runs-on: ubuntu-latest
     services:
       # The server test suite runs twice: against SQLite (default) and
-      # against this PostgreSQL instance (GEIST3_TEST_DB_URL below).
+      # against this PostgreSQL instance (THRUM_TEST_DB_URL below).
       postgres:
         image: postgres:17
         env:
-          POSTGRES_USER: geist3
-          POSTGRES_DB: geist3_test
+          POSTGRES_USER: thrum
+          POSTGRES_DB: thrum_test
           POSTGRES_HOST_AUTH_METHOD: trust
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U geist3"
+          --health-cmd "pg_isready -U thrum"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
@@ -37,7 +37,7 @@ jobs:
       - name: Tests
         run: cargo test
       - name: Tests against PostgreSQL
-        run: GEIST3_TEST_DB_URL=postgres://geist3@localhost:5432/geist3_test cargo test -p geist3-server
+        run: THRUM_TEST_DB_URL=postgres://thrum@localhost:5432/thrum_test cargo test -p thrum-server
 
   web:
     runs-on: ubuntu-latest
@@ -57,7 +57,7 @@ jobs:
         run: npm run build
         working-directory: web
       - name: Build the server binary
-        run: cargo build -p geist3-server
+        run: cargo build -p thrum-server
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium
         working-directory: web

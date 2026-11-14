@@ -6,11 +6,11 @@ use std::sync::Mutex;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use geist3_core::attachment::{FileKey, KEY_LEN, NONCE_LEN};
-use geist3_core::envelope::{AppMessage, Envelope, decode_envelope, encode_envelope};
-use geist3_core::mls::{DeviceCrypto, Incoming};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
+use thrum_core::attachment::{FileKey, KEY_LEN, NONCE_LEN};
+use thrum_core::envelope::{AppMessage, Envelope, decode_envelope, encode_envelope};
+use thrum_core::mls::{DeviceCrypto, Incoming};
 
 use crate::api::Client;
 use crate::session::Session;
@@ -207,7 +207,7 @@ impl Chat {
         let targets: Vec<String> = roster
             .iter()
             .filter(|identity| {
-                geist3_core::mls::split_identity(identity)
+                thrum_core::mls::split_identity(identity)
                     .is_some_and(|(member, _)| member == username)
             })
             .cloned()
@@ -323,7 +323,7 @@ impl Chat {
             .map_err(|error| error.to_string())?
         {
             return Err("this device has not joined this conversation's group yet; \
-                 run `geist3 recv` once to catch up"
+                 run `thrum recv` once to catch up"
                 .to_string());
         }
         self.catch_up().await?;
@@ -388,7 +388,7 @@ impl Chat {
         let prepared = crate::files::prepare_upload(path)?;
         let key = FileKey::generate();
         let blob_id = new_blob_id();
-        let ciphertext = geist3_core::attachment::encrypt_file(&key, &blob_id, &prepared.bytes);
+        let ciphertext = thrum_core::attachment::encrypt_file(&key, &blob_id, &prepared.bytes);
         self.client
             .upload_blob(&self.session.token, &blob_id, &ciphertext)
             .await?;
@@ -434,7 +434,7 @@ impl Chat {
             .fetch_blob(&self.session.token, &meta.blob_id)
             .await?
             .ok_or_else(|| "the attachment has expired on the server".to_string())?;
-        let plaintext = geist3_core::attachment::decrypt_file(&key, &meta.blob_id, &ciphertext)
+        let plaintext = thrum_core::attachment::decrypt_file(&key, &meta.blob_id, &ciphertext)
             .ok_or_else(|| {
                 "the attachment did not decrypt; key and blob do not match".to_string()
             })?;
@@ -679,7 +679,7 @@ impl Chat {
                     store.record_attachment(conversation_id, message_id, sender, meta);
                     Some(format!(
                         "{sender} sent {name} ({size} bytes); \
-                         run `geist3 fetch --message {message_id}` to save it"
+                         run `thrum fetch --message {message_id}` to save it"
                     ))
                 } else {
                     // This device's own echo; it already has the metadata.
@@ -736,7 +736,7 @@ fn new_blob_id() -> String {
 
 /// Encode payload bytes for tests and debugging.
 pub fn payload_to_base64(bytes: &[u8]) -> String {
-    geist3_core::protocol::encode_payload(bytes)
+    thrum_core::protocol::encode_payload(bytes)
 }
 
 /// A fetched key package may only enter a commit when it claims the
@@ -744,7 +744,7 @@ pub fn payload_to_base64(bytes: &[u8]) -> String {
 /// to hand out, and a malicious server must not steer a commit toward a
 /// device it controls (threat model, curious server operator).
 fn checked_key_package(
-    crypto: &geist3_core::mls::DeviceCrypto,
+    crypto: &thrum_core::mls::DeviceCrypto,
     package: &[u8],
     identity: &str,
 ) -> Result<Vec<u8>, String> {
@@ -762,7 +762,7 @@ fn checked_key_package(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use geist3_core::mls::DeviceCrypto;
+    use thrum_core::mls::DeviceCrypto;
 
     #[test]
     fn a_mismatched_key_package_is_rejected() {

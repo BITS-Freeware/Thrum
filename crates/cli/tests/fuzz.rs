@@ -9,7 +9,7 @@
 
 use std::path::Path;
 
-use geist3_cli::files::{mime_from_name, sanitize_name, save_attachment};
+use thrum_cli::files::{mime_from_name, sanitize_name, save_attachment};
 
 /// A tiny deterministic PRNG (xorshift64*) so fuzz runs are reproducible.
 struct Rng(u64);

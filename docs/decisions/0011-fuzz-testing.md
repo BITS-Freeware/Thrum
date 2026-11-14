@@ -47,7 +47,7 @@ the network:
   `process_incoming`, `process_welcome` and `key_package_identity` /
   `add_members` hand attacker-controllable bytes (the server relays
   payloads and serves key packages) to OpenMLS's TLS-codec parsers. The
-  fuzz property is that the Geist3 wrapper never panics and leaves the
+  fuzz property is that the Thrum wrapper never panics and leaves the
   device's group state intact and usable.
 - `cli::files::{sanitize_name, mime_from_name, split_name}` — attachment
   names arrive from other users inside encrypted messages and are used to
@@ -61,7 +61,7 @@ the network:
 - `image::load_from_memory` (attachment recompression) only ever sees
   files the local user chose to send. Received attachments are saved
   verbatim after the sha-256 check; rendering happens in the browser's
-  sandboxed image decoder. No Geist3 code decodes received image bytes.
+  sandboxed image decoder. No Thrum code decodes received image bytes.
 - `DeviceCrypto::from_json` and the CLI session store parse files the
   client itself wrote to local storage, not network data.
 - The blob upload path stores raw bytes opaquely, without parsing.
@@ -69,10 +69,10 @@ the network:
 ## What the fuzz layer found immediately
 
 The first run of the MLS fuzz tests crashed inside the dependency stack,
-not in Geist3 code: `tls_codec` 0.5.0 asserts (rather than returning an
+not in Thrum code: `tls_codec` 0.5.0 asserts (rather than returning an
 error) when a vector length prefix announces more bytes than the input
 holds, reachable through `process_welcome` and `key_package_identity`
-with attacker-controlled bytes. The mitigation lives at the Geist3
+with attacker-controlled bytes. The mitigation lives at the Thrum
 boundary: `core::mls::guard_panics` wraps the four OpenMLS parse entry
 points (`key_package_identity`, `add_members` package validation,
 `process_incoming` deserialization, `process_welcome` join) in

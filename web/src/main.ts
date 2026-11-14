@@ -1,4 +1,4 @@
-/// Geist3 web client: a small chat client over the same protocol as the
+/// Thrum web client: a small chat client over the same protocol as the
 /// CLI. Screens: register/login, chat list, new chat, conversation, group
 /// details, devices. All rendering is plain DOM, all state lives in
 /// IndexedDB plus the CryptoSession.
@@ -162,7 +162,7 @@ function renderAuth(): void {
   const main = document.createElement("main");
   main.className = "auth";
   const heading = document.createElement("h1");
-  heading.textContent = "Geist3";
+  heading.textContent = "Thrum";
   const tagline = document.createElement("p");
   tagline.textContent = "Small, end-to-end encrypted chat. Keys stay in this browser.";
   const form = document.createElement("form");

@@ -229,7 +229,7 @@ export class Api {
         body: bytes as unknown as BodyInit,
         headers: {
           "content-type": "application/octet-stream",
-          "x-geist3-blob-id": blobId,
+          "x-thrum-blob-id": blobId,
         },
       }),
     );

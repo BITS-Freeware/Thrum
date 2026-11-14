@@ -66,34 +66,34 @@ impl Config {
     /// Unrecognised or unparseable values fall back to the defaults.
     pub fn from_env() -> Self {
         let mut cfg = Self::default();
-        if let Ok(v) = env::var("GEIST3_ATTACHMENT_MAX_BYTES") {
+        if let Ok(v) = env::var("THRUM_ATTACHMENT_MAX_BYTES") {
             cfg.attachment_max_bytes = v.parse().unwrap_or(cfg.attachment_max_bytes);
         }
-        if let Ok(v) = env::var("GEIST3_DAILY_UPLOAD_BYTES") {
+        if let Ok(v) = env::var("THRUM_DAILY_UPLOAD_BYTES") {
             cfg.daily_upload_bytes = v.parse().unwrap_or(cfg.daily_upload_bytes);
         }
-        if let Ok(v) = env::var("GEIST3_BLOB_RETENTION_SECONDS") {
+        if let Ok(v) = env::var("THRUM_BLOB_RETENTION_SECONDS") {
             cfg.blob_retention_seconds = v.parse().unwrap_or(cfg.blob_retention_seconds);
         }
-        if let Ok(v) = env::var("GEIST3_BLOB_BACKEND") {
+        if let Ok(v) = env::var("THRUM_BLOB_BACKEND") {
             cfg.blob_backend = v;
         }
-        if let Ok(v) = env::var("GEIST3_BLOB_DIR") {
+        if let Ok(v) = env::var("THRUM_BLOB_DIR") {
             cfg.blob_dir = v;
         }
-        if let Ok(v) = env::var("GEIST3_S3_ENDPOINT") {
+        if let Ok(v) = env::var("THRUM_S3_ENDPOINT") {
             cfg.s3_endpoint = v;
         }
-        if let Ok(v) = env::var("GEIST3_S3_BUCKET") {
+        if let Ok(v) = env::var("THRUM_S3_BUCKET") {
             cfg.s3_bucket = v;
         }
-        if let Ok(v) = env::var("GEIST3_S3_REGION") {
+        if let Ok(v) = env::var("THRUM_S3_REGION") {
             cfg.s3_region = v;
         }
-        if let Ok(v) = env::var("GEIST3_S3_ACCESS_KEY_ID") {
+        if let Ok(v) = env::var("THRUM_S3_ACCESS_KEY_ID") {
             cfg.s3_access_key = v;
         }
-        if let Ok(v) = env::var("GEIST3_S3_SECRET_ACCESS_KEY") {
+        if let Ok(v) = env::var("THRUM_S3_SECRET_ACCESS_KEY") {
             cfg.s3_secret_key = v;
         }
         cfg

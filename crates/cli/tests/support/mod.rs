@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-/// A running Geist3 server on a random loopback port.
+/// A running Thrum server on a random loopback port.
 pub struct Server {
     pub base: String,
     pub db_path: std::path::PathBuf,
@@ -17,12 +17,12 @@ impl Server {
         let db_path = dir.path().join("e2e.sqlite");
         // Keep blobs inside the temp dir so tests never write into the
         // source tree.
-        let cfg = geist3_server::config::Config {
+        let cfg = thrum_server::config::Config {
             blob_dir: dir.path().join("blobs").to_string_lossy().into_owned(),
-            ..geist3_server::config::Config::default()
+            ..thrum_server::config::Config::default()
         };
         let state =
-            geist3_server::state::AppState::connect_database(&db_path.to_string_lossy(), cfg)
+            thrum_server::state::AppState::connect_database(&db_path.to_string_lossy(), cfg)
                 .await
                 .expect("test database");
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -30,7 +30,7 @@ impl Server {
             .expect("bind loopback");
         let addr = listener.local_addr().expect("local addr");
         tokio::spawn(async move {
-            geist3_server::serve(state, listener)
+            thrum_server::serve(state, listener)
                 .await
                 .expect("server stopped unexpectedly");
         });
@@ -43,15 +43,15 @@ impl Server {
     }
 }
 
-/// Run the geist3 binary.
+/// Run the thrum binary.
 pub fn run_cli(args: &[&str]) -> std::process::Output {
-    std::process::Command::new(env!("CARGO_BIN_EXE_geist3"))
+    std::process::Command::new(env!("CARGO_BIN_EXE_thrum"))
         .args(args)
         .output()
-        .expect("run geist3")
+        .expect("run thrum")
 }
 
-/// Run the geist3 binary and fail the test on a non-zero exit.
+/// Run the thrum binary and fail the test on a non-zero exit.
 pub fn expect_ok(output: &std::process::Output, what: &str) -> String {
     assert!(
         output.status.success(),
@@ -97,7 +97,7 @@ pub async fn pause(millis: u64) {
     tokio::time::sleep(Duration::from_millis(millis)).await;
 }
 
-/// Run the geist3 binary and fail the test on a zero exit; returns stderr.
+/// Run the thrum binary and fail the test on a zero exit; returns stderr.
 pub fn expect_fail(args: &[&str], what: &str) -> String {
     let output = run_cli(args);
     assert!(

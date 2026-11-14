@@ -17,7 +17,7 @@ async fn upload(app: &TestApp, token: &str, id: &str, bytes: &[u8]) -> reqwest::
     app.client
         .post(app.url("/v1/blobs"))
         .bearer_auth(token)
-        .header("x-geist3-blob-id", id)
+        .header("x-thrum-blob-id", id)
         .header("content-type", "application/octet-stream")
         .body(bytes.to_vec())
         .send()
@@ -109,9 +109,9 @@ async fn rejects_bad_ids() {
 
 #[tokio::test]
 async fn rejects_oversized_and_empty_blobs() {
-    let cfg = geist3_server::config::Config {
+    let cfg = thrum_server::config::Config {
         attachment_max_bytes: 1000,
-        ..geist3_server::config::Config::default()
+        ..thrum_server::config::Config::default()
     };
     let app = TestApp::spawn_with(cfg).await;
     register(&app, "alice", "correct horse battery").await;
@@ -137,9 +137,9 @@ async fn rejects_oversized_and_empty_blobs() {
 
 #[tokio::test]
 async fn enforces_daily_quota() {
-    let cfg = geist3_server::config::Config {
+    let cfg = thrum_server::config::Config {
         daily_upload_bytes: 100,
-        ..geist3_server::config::Config::default()
+        ..thrum_server::config::Config::default()
     };
     let app = TestApp::spawn_with(cfg).await;
     register(&app, "alice", "correct horse battery").await;
@@ -225,13 +225,13 @@ async fn sweeper_removes_expired_blobs() {
     // Age the row past retention, then sweep.
     sqlx::query("UPDATE blobs SET expires_at = $2 WHERE id = $1")
         .bind(&id)
-        .bind(geist3_server::accounts::now() - 1)
+        .bind(thrum_server::accounts::now() - 1)
         .execute(&app.state.db)
         .await
         .expect("age blob");
 
     let removed =
-        geist3_server::blobs::sweep_expired(&app.state.db, app.state.blob_store.as_ref()).await;
+        thrum_server::blobs::sweep_expired(&app.state.db, app.state.blob_store.as_ref()).await;
     assert_eq!(removed, 1, "the expired blob must be removed");
 
     // Both the object and the row are gone.

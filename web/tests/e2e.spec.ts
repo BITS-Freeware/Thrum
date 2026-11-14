@@ -133,7 +133,7 @@ test("two users chat live, form a group, and share an encrypted attachment", asy
 
   // --- attachment ---
 
-  const payload = `geist3 e2e attachment\nline ${"x".repeat(200)}\n`.repeat(50);
+  const payload = `thrum e2e attachment\nline ${"x".repeat(200)}\n`.repeat(50);
   const filePath = path.join(os.tmpdir(), "sample note.txt");
   fs.writeFileSync(filePath, payload, "utf8");
 

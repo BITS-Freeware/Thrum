@@ -1,8 +1,20 @@
 # Changelog
 
-All notable changes to Geist3 are documented here. The format follows
+All notable changes to Thrum are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/).
+
+## [Unreleased]
+
+### Changed
+
+- **Renamed from Geist3 to Thrum.** Crates are now `thrum-core`,
+  `thrum-server`, `thrum-cli` and `thrum-wasm`; binaries, the web package and
+  the `x-thrum-blob-id` header follow. Server settings moved from `GEIST3_*`
+  to `THRUM_*` environment variables, and data exports now report
+  `"format": "thrum-export"`. The repository moved to
+  [BITS-Freeware/Thrum](https://github.com/BITS-Freeware/Thrum). See
+  decision 0012.
 
 ## [0.1.0] - 2026-11-13
 
@@ -61,4 +73,4 @@ protection from the server operator, no at-rest encryption of client state,
 TLS termination is an operational requirement rather than code-enforced,
 and other items listed there.
 
-[0.1.0]: https://github.com/Zyniker13/Geist3/releases/tag/v0.1.0
+[0.1.0]: https://github.com/BITS-Freeware/Thrum/releases/tag/v0.1.0

@@ -1,6 +1,6 @@
 # Architecture
 
-Geist3 is a small end-to-end encrypted messenger: one Rust server that relays
+Thrum is a small end-to-end encrypted messenger: one Rust server that relays
 ciphertext, and clients that hold the keys. Everything a client needs to speak
 the protocol lives in one core crate, so the CLI client and the web client
 behave identically.

@@ -1,4 +1,4 @@
-/* @ts-self-types="./geist3_wasm.d.ts" */
+/* @ts-self-types="./thrum_wasm.d.ts" */
 
 /**
  * A device's MLS state. Create with [`new_device`] or
@@ -462,7 +462,7 @@ export function encryptFile(key_base64, nonce_base64, blob_id, plaintext) {
 
 /**
  * Generate a fresh per-file key and nonce as
- * `{ keyBase64, nonceBase64 }`, ready to travel inside an
+ * `{ key_base64, nonce_base64 }`, ready to travel inside an
  * `AppMessage::Attachment`.
  * @returns {any}
  */
@@ -817,7 +817,7 @@ function __wbg_get_imports() {
     };
     return {
         __proto__: null,
-        "./geist3_wasm_bg.js": import0,
+        "./thrum_wasm_bg.js": import0,
     };
 }
 
@@ -1101,7 +1101,7 @@ async function __wbg_init_once(module_or_path) {
     }
 
     if (module_or_path === undefined) {
-        module_or_path = new URL('geist3_wasm_bg.wasm', import.meta.url);
+        module_or_path = new URL('thrum_wasm_bg.wasm', import.meta.url);
     }
     const imports = __wbg_get_imports();
 

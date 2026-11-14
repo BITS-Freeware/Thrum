@@ -787,13 +787,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "geist3-cli"
+name = "thrum-cli"
 version = "0.1.0-dev"
 dependencies = [
  "base64 0.22.1",
  "clap",
  "futures-util",
- "geist3-core",
+ "thrum-core",
  "image",
  "rand 0.9.5",
  "reqwest",
@@ -806,7 +806,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "geist3-core"
+name = "thrum-core"
 version = "0.1.0-dev"
 dependencies = [
  "aes-gcm",
@@ -823,11 +823,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "geist3-fuzz"
+name = "thrum-fuzz"
 version = "0.0.0"
 dependencies = [
- "geist3-cli",
- "geist3-core",
+ "thrum-cli",
+ "thrum-core",
  "libfuzzer-sys",
  "serde_json",
  "tempfile",

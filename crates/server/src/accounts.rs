@@ -2,10 +2,10 @@
 
 use argon2::Argon2;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
-use geist3_core::UserName;
 use rand::RngCore;
 use sqlx::AnyPool;
 use std::sync::OnceLock;
+use thrum_core::UserName;
 use uuid::Uuid;
 
 use crate::auth;

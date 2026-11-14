@@ -6,7 +6,7 @@ members = ["crates/core", "crates/server", "crates/cli", "crates/wasm"]
 version = "0.1.0"
 edition = "2024"
 license = "AGPL-3.0-or-later"
-repository = "https://github.com/Zyniker13/Geist3"
+repository = "https://github.com/BITS-Freeware/Thrum"
 
 [workspace.dependencies]
 argon2 = "0.5"
@@ -26,5 +26,5 @@ tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 tower = { version = "0.5", features = ["util"] }
 url = "2"
 uuid = { version = "1", features = ["v4"] }
-geist3-core = { path = "crates/core" }
-geist3-server = { path = "crates/server" }
+thrum-core = { path = "crates/core" }
+thrum-server = { path = "crates/server" }

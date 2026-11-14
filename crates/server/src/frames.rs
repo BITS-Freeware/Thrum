@@ -1,9 +1,9 @@
 //! Wire frames for the message relay.
 
-use geist3_core::protocol::{ClientFrame, ServerFrame};
+use thrum_core::protocol::{ClientFrame, ServerFrame};
 
 /// Re-exported so handlers and tests share one import path.
-pub use geist3_core::protocol::{decode_payload, encode_payload};
+pub use thrum_core::protocol::{decode_payload, encode_payload};
 
 /// A frame waiting to go out to one device.
 pub type OutboundFrame = ServerFrame;

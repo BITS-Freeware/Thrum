@@ -35,14 +35,14 @@ cost), and every limit must be the operator's choice.
    Cloudflare R2, MinIO). Backend and credentials come from environment
    variables only.
 6. **Limits, all operator-configurable by environment:**
-   - `GEIST3_ATTACHMENT_MAX_BYTES` (default 20 MiB) - largest accepted
+   - `THRUM_ATTACHMENT_MAX_BYTES` (default 20 MiB) - largest accepted
      encrypted upload; refused with `too_large`.
-   - `GEIST3_DAILY_UPLOAD_BYTES` (default 100 MiB) - per-user quota counted
+   - `THRUM_DAILY_UPLOAD_BYTES` (default 100 MiB) - per-user quota counted
      over the current UTC calendar day; refused with `quota_exceeded`.
-   - `GEIST3_BLOB_RETENTION_SECONDS` (default 30 days).
-   - `GEIST3_BLOB_BACKEND` (`disk` default, `s3`), `GEIST3_BLOB_DIR`,
-     and `GEIST3_S3_ENDPOINT`, `GEIST3_S3_BUCKET`, `GEIST3_S3_REGION`,
-     `GEIST3_S3_ACCESS_KEY_ID`, `GEIST3_S3_SECRET_ACCESS_KEY`.
+   - `THRUM_BLOB_RETENTION_SECONDS` (default 30 days).
+   - `THRUM_BLOB_BACKEND` (`disk` default, `s3`), `THRUM_BLOB_DIR`,
+     and `THRUM_S3_ENDPOINT`, `THRUM_S3_BUCKET`, `THRUM_S3_REGION`,
+     `THRUM_S3_ACCESS_KEY_ID`, `THRUM_S3_SECRET_ACCESS_KEY`.
 7. **Images are resized and recompressed on the client before encryption**,
    so large photos do not waste quota or bandwidth. The CLI does this with
    the `image` crate; the web client (M6) will use browser canvas APIs, so

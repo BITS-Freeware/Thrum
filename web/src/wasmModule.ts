@@ -1,8 +1,8 @@
 /// One-time initializer for the wasm core module. The generated loader
-/// fetches `geist3_wasm_bg.wasm` relative to its own module URL, which Vite
+/// fetches `thrum_wasm_bg.wasm` relative to its own module URL, which Vite
 /// serves as a static asset in both dev and build.
 
-import init from "./wasm/geist3_wasm.js";
+import init from "./wasm/thrum_wasm.js";
 
 let ready: Promise<unknown> | null = null;
 

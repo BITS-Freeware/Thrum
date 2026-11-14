@@ -8,9 +8,9 @@
 //! failure reproduces from its seed. Deep coverage-guided fuzzing of the
 //! same parsers lives under `fuzz/` (see docs/decisions/0011).
 
-use geist3_core::envelope::{AppMessage, Envelope, decode_envelope, encode_envelope};
-use geist3_core::mls::{DeviceCrypto, Incoming};
-use geist3_core::protocol::{ClientFrame, ServerFrame, decode_payload, encode_payload};
+use thrum_core::envelope::{AppMessage, Envelope, decode_envelope, encode_envelope};
+use thrum_core::mls::{DeviceCrypto, Incoming};
+use thrum_core::protocol::{ClientFrame, ServerFrame, decode_payload, encode_payload};
 
 /// A tiny deterministic PRNG (xorshift64*) so fuzz runs are reproducible.
 struct Rng(u64);

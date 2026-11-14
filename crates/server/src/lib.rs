@@ -1,4 +1,4 @@
-//! Geist3 server: accounts, device registry, key packages, message relay.
+//! Thrum server: accounts, device registry, key packages, message relay.
 
 pub mod account;
 pub mod accounts;

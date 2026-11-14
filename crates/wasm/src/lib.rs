@@ -1,18 +1,18 @@
-//! WebAssembly bindings for the Geist3 core.
+//! WebAssembly bindings for the Thrum core.
 //!
 //! The web client gets exactly the same cryptographic operations as the CLI:
 //! MLS group handling through [`DeviceCrypto`], the per-file attachment
 //! crypto, and the application-message codec. Key material never leaves the
 //! page; the caller stores [`DeviceState`] JSON in IndexedDB.
 
-use geist3_core as core;
-use geist3_core::attachment::{FileKey, decrypt_file, encrypt_file};
-use geist3_core::envelope::AppMessage;
-use geist3_core::mls::{DeviceCrypto, Incoming};
-use geist3_core::protocol::{decode_payload, encode_payload};
 use js_sys::Uint8Array;
 use serde::Serialize;
 use serde_wasm_bindgen::to_value;
+use thrum_core as core;
+use thrum_core::attachment::{FileKey, decrypt_file, encrypt_file};
+use thrum_core::envelope::AppMessage;
+use thrum_core::mls::{DeviceCrypto, Incoming};
+use thrum_core::protocol::{decode_payload, encode_payload};
 use wasm_bindgen::prelude::*;
 
 /// Turn a JS byte array into a plain `Vec<u8>`.

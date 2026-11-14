@@ -20,7 +20,7 @@ fn state_dir() -> String {
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!(
-        "geist3-e2e-{}-{}-{}",
+        "thrum-e2e-{}-{}-{}",
         std::process::id(),
         seq,
         std::time::SystemTime::now()

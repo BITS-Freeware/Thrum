@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use common::{TestApp, login, register};
 use futures_util::{SinkExt, StreamExt};
-use geist3_core::protocol::{ClientFrame, ServerFrame};
 use serde_json::{Value, json};
+use thrum_core::protocol::{ClientFrame, ServerFrame};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 const PW: &str = "long enough password";
@@ -286,7 +286,7 @@ async fn catch_up_replays_undelivered_messages() {
 
 #[tokio::test]
 async fn expired_undelivered_messages_are_dropped() {
-    let cfg = geist3_server::config::Config {
+    let cfg = thrum_server::config::Config {
         queue_ttl_seconds: 1,
         ..Default::default()
     };
@@ -354,5 +354,5 @@ async fn sender_is_not_delivered_own_message() {
 
 /// Decode a base64 payload back to bytes; panics on malformed input.
 fn decode(encoded: &str) -> Vec<u8> {
-    geist3_core::protocol::decode_payload(encoded).expect("valid base64")
+    thrum_core::protocol::decode_payload(encoded).expect("valid base64")
 }

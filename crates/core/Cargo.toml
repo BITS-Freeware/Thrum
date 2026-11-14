@@ -1,10 +1,10 @@
 [package]
-name = "geist3-core"
+name = "thrum-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Geist3 core: protocol types and client logic shared by all clients"
+description = "Thrum core: protocol types and client logic shared by all clients"
 
 [dependencies]
 aes-gcm = "0.10"

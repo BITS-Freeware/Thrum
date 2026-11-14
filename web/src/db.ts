@@ -8,7 +8,7 @@
 
 import type { Session } from "./api";
 
-const DB_NAME = "geist3";
+const DB_NAME = "thrum";
 const DB_VERSION = 1;
 
 export interface StoredMessage {

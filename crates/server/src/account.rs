@@ -159,7 +159,7 @@ pub async fn export(
         .collect();
 
     let document = json!({
-        "format": "geist3-export",
+        "format": "thrum-export",
         "version": 1,
         "exported_at": accounts::now(),
         "account": account,
@@ -175,7 +175,7 @@ pub async fn export(
             (axum::http::header::CONTENT_TYPE, "application/json"),
             (
                 axum::http::header::CONTENT_DISPOSITION,
-                "attachment; filename=\"geist3-export.json\"",
+                "attachment; filename=\"thrum-export.json\"",
             ),
         ],
         Json(document),

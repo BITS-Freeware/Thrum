@@ -5,5 +5,5 @@
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
-geist3-state.json
+thrum-state.json
 blobs/

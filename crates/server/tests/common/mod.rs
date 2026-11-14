@@ -9,23 +9,23 @@ pub struct TestApp {
     pub db_path: std::path::PathBuf,
     /// Directory holding the server's blob store (disk backend).
     pub blob_dir: std::path::PathBuf,
-    pub state: geist3_server::state::AppState,
+    pub state: thrum_server::state::AppState,
     _dir: tempfile::TempDir,
 }
 
 impl TestApp {
     /// Spawn a server with default configuration.
     pub async fn spawn() -> Self {
-        Self::spawn_with(geist3_server::config::Config::default()).await
+        Self::spawn_with(thrum_server::config::Config::default()).await
     }
 
     /// Spawn a server with custom configuration. The blob directory is
     /// always redirected inside the test's temp directory so tests never
     /// write into the source tree.
-    pub async fn spawn_with(mut cfg: geist3_server::config::Config) -> Self {
+    pub async fn spawn_with(mut cfg: thrum_server::config::Config) -> Self {
         let dir = tempfile::tempdir().expect("temp dir");
         cfg.blob_dir = dir.path().join("blobs").to_string_lossy().into_owned();
-        let (db_url, db_path) = match std::env::var("GEIST3_TEST_DB_URL") {
+        let (db_url, db_path) = match std::env::var("THRUM_TEST_DB_URL") {
             // Run the same suite against PostgreSQL: every test gets its
             // own database so parallel tests cannot interfere.
             Ok(url) => {
@@ -36,7 +36,7 @@ impl TestApp {
                     .rsplit_once('/')
                     .map(|(_, db)| db.split('?').next().unwrap_or(db))
                     .filter(|db| !db.is_empty())
-                    .unwrap_or("geist3_test")
+                    .unwrap_or("thrum_test")
                     .chars()
                     .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
                     .collect::<String>();
@@ -61,7 +61,7 @@ impl TestApp {
                 (db_path.to_string_lossy().into_owned(), db_path.clone())
             }
         };
-        let state = geist3_server::state::AppState::connect_database(&db_url, cfg)
+        let state = thrum_server::state::AppState::connect_database(&db_url, cfg)
             .await
             .expect("test database");
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -71,7 +71,7 @@ impl TestApp {
         tokio::spawn({
             let state = state.clone();
             async move {
-                geist3_server::serve(state, listener)
+                thrum_server::serve(state, listener)
                     .await
                     .expect("server stopped unexpectedly");
             }

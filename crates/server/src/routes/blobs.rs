@@ -23,7 +23,7 @@ use crate::error::ApiError;
 use crate::state::AppState;
 
 /// The request header carrying the client-chosen blob id.
-const BLOB_ID_HEADER: &str = "x-geist3-blob-id";
+const BLOB_ID_HEADER: &str = "x-thrum-blob-id";
 
 /// `POST /v1/blobs`: store an encrypted blob under a client-chosen id.
 ///

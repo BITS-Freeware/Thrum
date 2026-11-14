@@ -1,4 +1,4 @@
-//! HTTP calls to the Geist3 server.
+//! HTTP calls to the Thrum server.
 
 use serde_json::Value;
 
@@ -497,7 +497,7 @@ impl Client {
             .post(format!("{}/v1/blobs", self.base))
             .bearer_auth(token)
             .header("content-type", "application/octet-stream")
-            .header("x-geist3-blob-id", blob_id)
+            .header("x-thrum-blob-id", blob_id)
             .body(bytes.to_vec())
             .send()
             .await

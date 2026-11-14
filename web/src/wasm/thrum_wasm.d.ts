@@ -125,7 +125,7 @@ export function encryptFile(key_base64: string, nonce_base64: string, blob_id: s
 
 /**
  * Generate a fresh per-file key and nonce as
- * `{ keyBase64, nonceBase64 }`, ready to travel inside an
+ * `{ key_base64, nonce_base64 }`, ready to travel inside an
  * `AppMessage::Attachment`.
  */
 export function newFileKey(): any;

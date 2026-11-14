@@ -26,7 +26,7 @@ set that both backends execute.
    `lower(username)` unique index), so SQLite keeps `migrations/` and
    PostgreSQL gets `migrations-pg/` with identical versions and order.
    The backend is chosen by the connection string: a `postgres://` URL in
-   `GEIST3_DB` selects PostgreSQL, anything else is a SQLite path.
+   `THRUM_DB` selects PostgreSQL, anything else is a SQLite path.
 3. **Insertion-order tiebreaks are explicit.** Catch-up delivery and key
    package selection order by `created_at` plus an insertion-order
    tiebreak; SQLite uses its implicit `rowid`, PostgreSQL adds `seq`
@@ -37,7 +37,7 @@ set that both backends execute.
    uniqueness with an expression index, SQLite with `COLLATE NOCASE`
    (plus an expression index for seeking).
 5. **The integration suite runs against both backends.**
-   `GEIST3_TEST_DB_URL` redirects the whole server test suite to a
+   `THRUM_TEST_DB_URL` redirects the whole server test suite to a
    PostgreSQL URL (each test gets its own throwaway database), and CI
    runs it against a postgres:17 service container next to the SQLite
    run. Aggregate expressions are written to return BIGINT on both

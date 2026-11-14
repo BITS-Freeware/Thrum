@@ -1,6 +1,6 @@
 //! Local file handling for attachments.
 //!
-//! Geist3 is chat-first: images are resized and recompressed before they
+//! Thrum is chat-first: images are resized and recompressed before they
 //! are encrypted and uploaded, so large photos do not waste quota or
 //! bandwidth. Received files are saved under sanitized names.
 

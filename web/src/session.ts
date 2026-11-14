@@ -18,7 +18,7 @@ import {
   newFileKey,
   new_device,
   type DeviceState,
-} from "./wasm/geist3_wasm.js";
+} from "./wasm/thrum_wasm.js";
 import { initWasm } from "./wasmModule";
 
 import { Api, type Session } from "./api";

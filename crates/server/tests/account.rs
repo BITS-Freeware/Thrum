@@ -47,7 +47,7 @@ async fn export_empty_account() {
         .expect("export request");
     assert_eq!(resp.status(), 200);
     let doc: serde_json::Value = resp.json().await.expect("export body");
-    assert_eq!(doc["format"], "geist3-export");
+    assert_eq!(doc["format"], "thrum-export");
     assert_eq!(doc["version"], 1);
     assert_eq!(doc["account"]["username"], "alice");
     // Login creates a device, so it's not empty.

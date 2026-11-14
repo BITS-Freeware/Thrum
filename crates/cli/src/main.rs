@@ -1,20 +1,20 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use geist3_cli::api::Client;
-use geist3_cli::chat::Chat;
-use geist3_cli::session::{self, Session};
-use geist3_cli::ws::{RecvOptions, recv};
+use thrum_cli::api::Client;
+use thrum_cli::chat::Chat;
+use thrum_cli::session::{self, Session};
+use thrum_cli::ws::{RecvOptions, recv};
 
-/// Geist3 command line client.
+/// Thrum command line client.
 #[derive(Parser)]
-#[command(name = "geist3", version, about)]
+#[command(name = "thrum", version, about)]
 struct Cli {
-    /// Base URL of the Geist3 server.
+    /// Base URL of the Thrum server.
     #[arg(long, default_value = "http://127.0.0.1:8080")]
     server: String,
     /// Where to keep the logged-in session between commands.
-    #[arg(long, default_value = "geist3-state.json")]
+    #[arg(long, default_value = "thrum-state.json")]
     state_file: PathBuf,
     #[command(subcommand)]
     command: Command,
@@ -156,8 +156,8 @@ enum Command {
     Whoami,
     /// Download a JSON export of everything the server knows about you.
     Export {
-        /// Where to write the JSON document; defaults to `geist3-export.json`.
-        #[arg(long, default_value = "geist3-export.json")]
+        /// Where to write the JSON document; defaults to `thrum-export.json`.
+        #[arg(long, default_value = "thrum-export.json")]
         out: PathBuf,
     },
     /// Permanently delete the account on this server; requires --yes.
@@ -177,7 +177,7 @@ fn load_session(state_file: &std::path::Path, base: &str) -> Result<Session, Str
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
-    let base = match geist3_cli::normalize_base_url(&cli.server) {
+    let base = match thrum_cli::normalize_base_url(&cli.server) {
         Ok(base) => base,
         Err(error) => {
             eprintln!("error: {error}");

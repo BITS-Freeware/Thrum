@@ -1,4 +1,4 @@
-//! MLS layer for Geist3 clients.
+//! MLS layer for Thrum clients.
 //!
 //! Every device is an MLS member with a `BasicCredential` whose identity is
 //! `username#device-id`. Groups are keyed by the relay conversation id, and
@@ -17,7 +17,7 @@ use openmls_rust_crypto::OpenMlsRustCrypto;
 use serde::{Deserialize, Serialize};
 use tls_codec::{DeserializeBytes as TlsDeserializeBytes, Serialize as TlsSerialize};
 
-/// The one ciphersuite every Geist3 client speaks.
+/// The one ciphersuite every Thrum client speaks.
 pub const CIPHERSUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
 
 /// Errors from the MLS layer.
@@ -86,7 +86,7 @@ fn guard_panics<T>(work: impl FnOnce() -> Result<T, MlsError>) -> Result<T, MlsE
     })
 }
 
-/// A MLS group member as Geist3 sees it: the credential identity string.
+/// A MLS group member as Thrum sees it: the credential identity string.
 pub fn member_identity(credential: &Credential) -> Result<String, MlsError> {
     if credential.credential_type() != CredentialType::Basic {
         return Err(MlsError::BadIdentity);

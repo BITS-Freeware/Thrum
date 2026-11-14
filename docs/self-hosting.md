@@ -1,6 +1,6 @@
-# Self-hosting Geist3
+# Self-hosting Thrum
 
-Geist3 is a small server plus clients. The server relays encrypted
+Thrum is a small server plus clients. The server relays encrypted
 messages and stores encrypted blobs; it never holds decryption keys. One
 binary can serve both the API and the built web client on the same
 origin, so a small install needs nothing but the server and a data
@@ -15,20 +15,20 @@ directory.
 ## Quick start with Docker Compose
 
 ```sh
-git clone https://github.com/Zyniker13/Geist3.git
-cd Geist3
+git clone https://github.com/BITS-Freeware/Thrum.git
+cd Thrum
 docker compose up -d --build
 ```
 
 The server listens on port 8080 and keeps everything in the
-`geist3-data` volume. Open `http://your-host:8080/` for the web client,
+`thrum-data` volume. Open `http://your-host:8080/` for the web client,
 or point the CLI at `http://your-host:8080`.
 
 To run on PostgreSQL instead of SQLite:
 
 ```sh
 docker compose --profile postgres up -d --build
-# then uncomment GEIST3_DB in docker-compose.yml and run again:
+# then uncomment THRUM_DB in docker-compose.yml and run again:
 docker compose --profile postgres up -d
 ```
 
@@ -38,20 +38,20 @@ Building needs a Rust toolchain (2024 edition) and Node 22 for the web
 client. The web client is optional; the CLI works without it.
 
 ```sh
-git clone https://github.com/Zyniker13/Geist3.git
-cd Geist3
-cargo build --release -p geist3-server -p geist3-cli
+git clone https://github.com/BITS-Freeware/Thrum.git
+cd Thrum
+cargo build --release -p thrum-server -p thrum-cli
 
 # optional: build the web client and serve it from the server
 (cd web && npm ci && npm run build)
 
-GEIST3_DB=/var/lib/geist3/geist3.sqlite \
-GEIST3_WEB_DIR=web/dist \
-./target/release/geist3-server
+THRUM_DB=/var/lib/thrum/thrum.sqlite \
+THRUM_WEB_DIR=web/dist \
+./target/release/thrum-server
 ```
 
 The server creates the SQLite file if it is missing. With
-`GEIST3_WEB_DIR` set, `http://localhost:8080/` serves the web client;
+`THRUM_WEB_DIR` set, `http://localhost:8080/` serves the web client;
 without it, only the API is available (the web client can be hosted
 anywhere static files are served, but it must share the server's origin,
 because browsers only allow same-origin API calls).
@@ -63,20 +63,20 @@ back to the default shown.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `GEIST3_DB` | `geist3.sqlite` | SQLite file path, or a `postgres://` URL |
-| `GEIST3_BIND` | `0.0.0.0` | Address to listen on (`127.0.0.1` for local only) |
-| `GEIST3_PORT` | `8080` | Port to listen on |
-| `GEIST3_WEB_DIR` | unset | Serve the built web client from this directory |
-| `GEIST3_ATTACHMENT_MAX_BYTES` | `20971520` | Largest accepted blob, bytes (20 MiB) |
-| `GEIST3_DAILY_UPLOAD_BYTES` | `104857600` | Per-user daily upload quota, bytes (100 MiB) |
-| `GEIST3_BLOB_RETENTION_SECONDS` | `2592000` | How long blobs are kept, seconds (30 days) |
-| `GEIST3_BLOB_BACKEND` | `disk` | `disk` or `s3` |
-| `GEIST3_BLOB_DIR` | `blobs` | Directory for disk-backed blobs |
-| `GEIST3_S3_ENDPOINT` | unset | S3-compatible endpoint (R2, MinIO, AWS) |
-| `GEIST3_S3_BUCKET` | unset | Bucket name |
-| `GEIST3_S3_REGION` | unset | Region (e.g. `auto` for R2) |
-| `GEIST3_S3_ACCESS_KEY_ID` | unset | Access key id |
-| `GEIST3_S3_SECRET_ACCESS_KEY` | unset | Secret access key |
+| `THRUM_DB` | `thrum.sqlite` | SQLite file path, or a `postgres://` URL |
+| `THRUM_BIND` | `0.0.0.0` | Address to listen on (`127.0.0.1` for local only) |
+| `THRUM_PORT` | `8080` | Port to listen on |
+| `THRUM_WEB_DIR` | unset | Serve the built web client from this directory |
+| `THRUM_ATTACHMENT_MAX_BYTES` | `20971520` | Largest accepted blob, bytes (20 MiB) |
+| `THRUM_DAILY_UPLOAD_BYTES` | `104857600` | Per-user daily upload quota, bytes (100 MiB) |
+| `THRUM_BLOB_RETENTION_SECONDS` | `2592000` | How long blobs are kept, seconds (30 days) |
+| `THRUM_BLOB_BACKEND` | `disk` | `disk` or `s3` |
+| `THRUM_BLOB_DIR` | `blobs` | Directory for disk-backed blobs |
+| `THRUM_S3_ENDPOINT` | unset | S3-compatible endpoint (R2, MinIO, AWS) |
+| `THRUM_S3_BUCKET` | unset | Bucket name |
+| `THRUM_S3_REGION` | unset | Region (e.g. `auto` for R2) |
+| `THRUM_S3_ACCESS_KEY_ID` | unset | Access key id |
+| `THRUM_S3_SECRET_ACCESS_KEY` | unset | Secret access key |
 
 Messages the server queues for offline devices are deleted after seven
 days; clients fetch everything they missed when they reconnect. The
@@ -84,11 +84,11 @@ server keeps no delivered message history at all.
 
 ## PostgreSQL
 
-Point `GEIST3_DB` at a PostgreSQL URL; migrations run automatically on
+Point `THRUM_DB` at a PostgreSQL URL; migrations run automatically on
 first start:
 
 ```sh
-GEIST3_DB=postgres://geist3:secret@localhost:5432/geist3 ./target/release/geist3-server
+THRUM_DB=postgres://thrum:secret@localhost:5432/thrum ./target/release/thrum-server
 ```
 
 The same application runs the same schema on both backends. SQLite is
@@ -101,13 +101,13 @@ Encrypted attachment blobs can live in any S3-compatible store (AWS S3,
 Cloudflare R2, MinIO) instead of the local disk:
 
 ```sh
-GEIST3_BLOB_BACKEND=s3 \
-GEIST3_S3_ENDPOINT=https://<account>.r2.cloudflarestorage.com \
-GEIST3_S3_BUCKET=geist3 \
-GEIST3_S3_REGION=auto \
-GEIST3_S3_ACCESS_KEY_ID=... \
-GEIST3_S3_SECRET_ACCESS_KEY=... \
-./target/release/geist3-server
+THRUM_BLOB_BACKEND=s3 \
+THRUM_S3_ENDPOINT=https://<account>.r2.cloudflarestorage.com \
+THRUM_S3_BUCKET=thrum \
+THRUM_S3_REGION=auto \
+THRUM_S3_ACCESS_KEY_ID=... \
+THRUM_S3_SECRET_ACCESS_KEY=... \
+./target/release/thrum-server
 ```
 
 Existing blobs stay where they are; migration between backends is a copy
@@ -130,12 +130,12 @@ location / {
 ```
 
 The same proxy can also serve the web client's static files itself
-instead of `GEIST3_WEB_DIR`; both work, because the client always talks
+instead of `THRUM_WEB_DIR`; both work, because the client always talks
 to its own origin.
 
 ## Backups
 
-- **SQLite**: stop the server (or use `sqlite3 geist3.sqlite ".backup
+- **SQLite**: stop the server (or use `sqlite3 thrum.sqlite ".backup
   ..."`), then copy the database file and the blob directory.
 - **PostgreSQL**: `pg_dump` plus the blob directory (or the object
   store).

@@ -7,7 +7,7 @@ Status: accepted
 
 M3 makes every message payload an MLS (RFC 9420) application message. The
 roadmap fixes the library (`openmls` with `openmls_rust_crypto`), so the
-decision here is how Geist3 uses it, not which library to use.
+decision here is how Thrum uses it, not which library to use.
 
 ## Choices
 

@@ -6,7 +6,7 @@ use axum::extract::State;
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
 use axum::response::Response;
 use futures_util::{SinkExt, StreamExt};
-use geist3_core::protocol::{ClientFrame, ServerFrame};
+use thrum_core::protocol::{ClientFrame, ServerFrame};
 use tokio::sync::mpsc;
 
 use crate::accounts::now;

@@ -1,13 +1,13 @@
 [package]
-name = "geist3-server"
+name = "thrum-server"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Geist3 server: accounts, conversation membership and encrypted message relay"
+description = "Thrum server: accounts, conversation membership and encrypted message relay"
 
 [[bin]]
-name = "geist3-server"
+name = "thrum-server"
 path = "src/main.rs"
 
 [dependencies]
@@ -15,7 +15,7 @@ argon2.workspace = true
 async-trait = "0.1"
 axum.workspace = true
 futures-util.workspace = true
-geist3-core.workspace = true
+thrum-core.workspace = true
 object_store = { version = "0.12", default-features = false, features = ["aws"] }
 rand.workspace = true
 serde.workspace = true

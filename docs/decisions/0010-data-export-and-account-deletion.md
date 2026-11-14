@@ -67,7 +67,7 @@ write paths only ever inserted rows that satisfy the constraints.
 ## Client surface
 
 The CLI grows `export` (writes the JSON document to a file, default
-`geist3-export.json`) and `delete-account --password ... --yes` (the
+`thrum-export.json`) and `delete-account --password ... --yes` (the
 `--yes` flag is a second, local confirmation; on success the CLI removes
 the saved session file because its token is dead, and leaves the local
 message store in place). The web client can surface both later; the API

@@ -1,6 +1,6 @@
 # Contributing
 
-Geist3 is a small, trustworthy messenger. Contributions that keep it small
+Thrum is a small, trustworthy messenger. Contributions that keep it small
 and trustworthy are welcome.
 
 ## Building and testing

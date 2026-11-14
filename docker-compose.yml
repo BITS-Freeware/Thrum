@@ -1,15 +1,15 @@
 services:
-  geist3:
+  thrum:
     build: .
     ports:
       - "8080:8080"
     volumes:
-      - geist3-data:/data
+      - thrum-data:/data
     environment:
       # SQLite by default. For PostgreSQL use the "postgres" profile and
       # uncomment:
-      # GEIST3_DB: postgres://geist3:geist3@postgres:5432/geist3
-      GEIST3_BLOB_BACKEND: disk
+      # THRUM_DB: postgres://thrum:thrum@postgres:5432/thrum
+      THRUM_BLOB_BACKEND: disk
     restart: unless-stopped
 
   # Optional: `docker compose --profile postgres up -d` switches the
@@ -19,13 +19,13 @@ services:
     image: postgres:17
     profiles: ["postgres"]
     environment:
-      POSTGRES_USER: geist3
-      POSTGRES_PASSWORD: geist3
-      POSTGRES_DB: geist3
+      POSTGRES_USER: thrum
+      POSTGRES_PASSWORD: thrum
+      POSTGRES_DB: thrum
     volumes:
-      - geist3-postgres:/var/lib/postgresql/data
+      - thrum-postgres:/var/lib/postgresql/data
     restart: unless-stopped
 
 volumes:
-  geist3-data:
-  geist3-postgres:
+  thrum-data:
+  thrum-postgres:
