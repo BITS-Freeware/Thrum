@@ -125,7 +125,11 @@ test("two users chat live, form a group, and share an encrypted attachment", asy
   ).toBeVisible();
   await alice.getByLabel("Rename group").fill("group2");
   await alice.getByRole("button", { name: "Rename" }).click();
-  await expect(alice.getByRole("heading", { name: "group2", exact: true })).toBeVisible();
+  // The heading updates only once the rename round-trips through the
+  // server, so give it the same window as the other live assertions.
+  await expect(
+    alice.getByRole("heading", { name: "group2", exact: true }),
+  ).toBeVisible({ timeout: 20_000 });
 
   // --- attachment ---
 
