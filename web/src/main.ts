@@ -24,6 +24,26 @@ const drafts: Record<string, string> = {};
 let renderChain: Promise<void> = Promise.resolve();
 
 /**
+ * Values of the named inputs of the screen about to be replaced, but
+ * only when that screen really is the one the new build will draw
+ * (same hash). Live re-renders (an incoming frame schedules one 120 ms
+ * later) must not silently discard what the user is typing on a form,
+ * so callers restore these values after the rebuild.
+ */
+function savedInputValues(
+  expectedHash: string,
+  names: string[],
+): Record<string, string> {
+  const saved: Record<string, string> = {};
+  if (window.location.hash !== expectedHash) return saved;
+  for (const name of names) {
+    const input = screen.querySelector<HTMLInputElement>(`input[name="${name}"]`);
+    if (input) saved[name] = input.value;
+  }
+  return saved;
+}
+
+/**
  * Queue one screen render; only one runs at a time. A burst of triggers
  * (a click's navigation, a live-refresh after incoming frames) must not
  * interleave at await points and stack two partial screens — two headers
@@ -267,6 +287,8 @@ async function renderChats(): Promise<void> {
 // --- new chat ---
 
 function renderNewChat(inviteMode: boolean): void {
+  const hash = inviteMode ? "#/new/invite" : "#/new";
+  const saved = savedInputValues(hash, inviteMode ? ["token"] : ["members", "name"]);
   screen.replaceChildren();
   const back = navLink("Back", "#/chats");
   screen.append(header(inviteMode ? "Join with invite" : "New chat", [back]));
@@ -284,6 +306,7 @@ function renderNewChat(inviteMode: boolean): void {
     label.textContent = "Invite token";
     const input = document.createElement("input");
     input.name = "token";
+    input.value = saved.token ?? "";
     input.required = true;
     label.append(input);
     form.append(label);
@@ -294,11 +317,13 @@ function renderNewChat(inviteMode: boolean): void {
     membersInput.name = "members";
     membersInput.required = true;
     membersInput.spellcheck = false;
+    membersInput.value = saved.members ?? "";
     label.append(membersInput);
     const nameLabel = document.createElement("label");
     nameLabel.textContent = "Group name (optional)";
     nameInput = document.createElement("input");
     nameInput.name = "name";
+    nameInput.value = saved.name ?? "";
     nameLabel.append(nameInput);
     form.append(label, nameLabel);
   }
@@ -550,6 +575,7 @@ async function labelFor(conversationId: string): Promise<string> {
 // --- group details ---
 
 async function renderGroup(conversationId: string): Promise<void> {
+  const saved = savedInputValues(`#/group/${conversationId}`, ["member", "name"]);
   screen.replaceChildren();
   const back = navLink("Back", `#/chat/${conversationId}`);
   screen.append(header("Group", [back]));
@@ -577,6 +603,7 @@ async function renderGroup(conversationId: string): Promise<void> {
   addLabel.textContent = "Add member by username";
   const addInput = document.createElement("input");
   addInput.name = "member";
+  addInput.value = saved.member ?? "";
   addLabel.append(addInput);
   const addSubmit = document.createElement("button");
   addSubmit.type = "submit";
@@ -587,6 +614,7 @@ async function renderGroup(conversationId: string): Promise<void> {
     void (async () => {
       try {
         await session!.addMembers(conversationId, [addInput.value.trim().toLowerCase()]);
+        addInput.value = "";
         await render();
       } catch (caught) {
         showNotice(errorText(caught));
@@ -599,7 +627,7 @@ async function renderGroup(conversationId: string): Promise<void> {
   renameLabel.textContent = "Rename group";
   const renameInput = document.createElement("input");
   renameInput.name = "name";
-  renameInput.value = conversation.name ?? "";
+  renameInput.value = saved.name ?? conversation.name ?? "";
   renameLabel.append(renameInput);
   const renameSubmit = document.createElement("button");
   renameSubmit.type = "submit";
