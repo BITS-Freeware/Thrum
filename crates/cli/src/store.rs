@@ -3,7 +3,7 @@
 //! messages; this store applies them. The server keeps no history, so this
 //! file is the only record.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -43,6 +43,16 @@ pub struct Entry {
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Store {
     conversations: BTreeMap<String, BTreeMap<String, Entry>>,
+    /// Device identities (`username#device-id`) this user has agreed to add.
+    #[serde(default)]
+    trusted_devices: BTreeSet<String>,
+    /// Conversation id → device identities waiting for approval.
+    #[serde(default)]
+    pending_devices: BTreeMap<String, Vec<String>>,
+    /// Conversation id → accounts whose devices this client has already
+    /// considered. A device that appears after that stays pending.
+    #[serde(default)]
+    known_accounts: BTreeMap<String, BTreeSet<String>>,
     #[serde(skip)]
     path: Option<PathBuf>,
 }
@@ -65,6 +75,7 @@ impl Store {
             Err(_) => Self {
                 conversations: BTreeMap::new(),
                 path: Some(path),
+                ..Self::default()
             },
         }
     }
@@ -220,6 +231,61 @@ impl Store {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// Remember that this user accepts `identity` into their groups.
+    pub fn trust(&mut self, identity: &str) {
+        self.trusted_devices.insert(identity.to_string());
+        for pending in self.pending_devices.values_mut() {
+            pending.retain(|item| item != identity);
+        }
+        self.pending_devices
+            .retain(|_, pending| !pending.is_empty());
+        self.save();
+    }
+
+    /// Device identities this user has agreed to add.
+    pub fn trusted(&self) -> BTreeSet<String> {
+        self.trusted_devices.clone()
+    }
+
+    /// Whether this conversation has already introduced `username`.
+    pub fn knows_account(&self, conversation_id: &str, username: &str) -> bool {
+        self.known_accounts
+            .get(conversation_id)
+            .is_some_and(|names| names.iter().any(|name| name.eq_ignore_ascii_case(username)))
+    }
+
+    /// Remember that `username` has been seen in this conversation.
+    pub fn mark_known(&mut self, conversation_id: &str, username: &str) {
+        self.known_accounts
+            .entry(conversation_id.to_string())
+            .or_default()
+            .insert(username.to_string());
+        self.save();
+    }
+
+    /// Replace the pending list for one conversation.
+    pub fn set_pending(&mut self, conversation_id: &str, identities: &[String]) {
+        if identities.is_empty() {
+            self.pending_devices.remove(conversation_id);
+        } else {
+            self.pending_devices
+                .insert(conversation_id.to_string(), identities.to_vec());
+        }
+        self.save();
+    }
+
+    /// `(conversation id, identity)` pairs waiting for approval.
+    pub fn pending(&self) -> Vec<(String, String)> {
+        self.pending_devices
+            .iter()
+            .flat_map(|(conversation, identities)| {
+                identities
+                    .iter()
+                    .map(|identity| (conversation.clone(), identity.clone()))
+            })
+            .collect()
     }
 
     /// Persist to disk; failures are swallowed, the store is a cache.

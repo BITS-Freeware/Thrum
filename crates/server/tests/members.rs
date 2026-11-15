@@ -256,10 +256,12 @@ async fn key_package_count_tracks_uploads_and_fetches() {
     let response = app.get("/v1/key-packages/count", Some(alice_token)).await;
     assert_eq!(response.json::<Value>().await.unwrap()["count"], json!(3));
 
-    // A fetch consumes one. Fetching is unauthenticated: key packages are
-    // public, single-use MLS material.
+    // A fetch consumes one. Fetching requires a logged-in caller.
     let response = app
-        .get(&format!("/v1/devices/{alice_device}/key-package"), None)
+        .get(
+            &format!("/v1/devices/{alice_device}/key-package"),
+            Some(alice_token),
+        )
         .await;
     assert_eq!(response.status(), 200);
 

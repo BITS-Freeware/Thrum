@@ -65,6 +65,9 @@ pub async fn create(
     }
     member_ids.sort_unstable();
     member_ids.dedup();
+    if group_too_large(state.cfg.max_group_members, member_ids.len() + 1) {
+        return Err(ApiError::bad_request("group_too_large"));
+    }
     let conversation_id =
         messages::create_conversation(&state.db, authed.user_id, &member_ids, &name).await?;
     Ok((
@@ -157,6 +160,12 @@ pub async fn send_message(
         },
     );
     Ok((StatusCode::CREATED, Json(json!({ "id": message_id }))))
+}
+
+/// True when `size` is over the operator's member cap. A cap of zero means
+/// there is no limit.
+pub(crate) fn group_too_large(max_members: u32, size: usize) -> bool {
+    max_members > 0 && size > max_members as usize
 }
 
 /// Validate a group name: bounded length, no control characters.

@@ -150,8 +150,22 @@ enum Command {
         #[arg(long)]
         user: String,
     },
-    /// Join new devices to all groups and top up key packages.
+    /// Join trusted devices to all groups, drop revoked ones, and top up key packages.
     Sync,
+    /// Allow a device identity into this account's conversations.
+    ///
+    /// The identity is `username#device-id`, as shown by a pending line from
+    /// `sync`. The device is added on the sync that follows.
+    Trust {
+        #[arg(long)]
+        device: String,
+    },
+    /// Revoke one of your devices. It can no longer sign in. Other members
+    /// drop it from conversations the next time they sync.
+    RevokeDevice {
+        #[arg(long)]
+        device: String,
+    },
     /// Show the stored session.
     Whoami,
     /// Download a JSON export of everything the server knows about you.
@@ -357,8 +371,22 @@ async fn run(cli: &Cli, base: &str) -> Result<(), String> {
         Command::Sync => {
             let session = load_session(&cli.state_file, base)?;
             let chat = Chat::open(client, session, &cli.state_file)?;
-            chat.sync().await?;
+            let report = chat.sync().await?;
+            report_lines(&report);
             println!("synced");
+        }
+        Command::Trust { device } => {
+            let session = load_session(&cli.state_file, base)?;
+            let chat = Chat::open(client, session, &cli.state_file)?;
+            chat.trust_device(device)?;
+            let report = chat.sync().await?;
+            report_lines(&report);
+            println!("trusted {device}");
+        }
+        Command::RevokeDevice { device } => {
+            let session = load_session(&cli.state_file, base)?;
+            client.revoke_device(&session.token, device).await?;
+            println!("revoked {device}");
         }
         Command::Whoami => {
             let session = load_session(&cli.state_file, base)?;
@@ -399,6 +427,17 @@ async fn run(cli: &Cli, base: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn report_lines(report: &thrum_cli::chat::SyncReport) {
+    for line in report
+        .removed
+        .iter()
+        .chain(&report.added)
+        .chain(&report.pending)
+    {
+        eprintln!("{line}");
+    }
 }
 
 /// Parse the comma-separated member list.

@@ -2,7 +2,7 @@
 
 An open-source messenger with only the core features: accounts, one-to-one and group messaging, attachments, and end-to-end encryption by default. No cryptocurrency, mini-apps, ads, or paid tiers.
 
-Status: version 0.1.0 is released. See [ROADMAP.md](ROADMAP.md) for the plan and [STATUS.md](STATUS.md) for where work stands.
+Status: version 0.2.0. See [CHANGELOG.md](CHANGELOG.md) for this release and [STATUS.md](STATUS.md) for where work stands. [ROADMAP.md](ROADMAP.md) records the 0.1.0 plan.
 
 ## Design in Brief
 

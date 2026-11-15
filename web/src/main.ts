@@ -3,7 +3,7 @@
 /// details, devices. All rendering is plain DOM, all state lives in
 /// IndexedDB plus the CryptoSession.
 
-import { ApiError } from "./api";
+import { Api, ApiError } from "./api";
 import { LiveConnection } from "./live";
 import { CryptoSession } from "./session";
 import {
@@ -254,6 +254,19 @@ async function renderChats(): Promise<void> {
   } catch (error) {
     showNotice(errorText(error));
   }
+  const pending = (await session?.pendingDevices()) ?? [];
+  if (pending.length > 0) {
+    const banner = document.createElement("p");
+    banner.className = "banner";
+    const link = document.createElement("a");
+    link.href = "#/devices";
+    link.textContent =
+      pending.length === 1
+        ? "1 device is waiting for your approval"
+        : `${pending.length} devices are waiting for your approval`;
+    banner.append(link);
+    screen.append(banner);
+  }
   const conversations = await loadConversations();
   const list = document.createElement("ul");
   list.className = "chat-list";
@@ -472,6 +485,7 @@ async function renderConversation(conversationId: string): Promise<void> {
 function messageItem(conversationId: string, message: StoredMessage): HTMLLIElement {
   const item = document.createElement("li");
   if (message.sender === session?.current?.username) item.className = "own";
+  if (message.sender === "thrum") item.className = "system";
   const sender = document.createElement("span");
   sender.className = "sender";
   sender.textContent = message.sender;
@@ -707,10 +721,66 @@ async function renderDevices(): Promise<void> {
     showNotice(errorText(caught));
   }
   main.append(list);
+  const pending = (await session?.pendingDevices()) ?? [];
+  if (pending.length > 0) {
+    const heading = document.createElement("h2");
+    heading.textContent = "Waiting for approval";
+    const waiting = document.createElement("ul");
+    waiting.className = "members";
+    for (const entry of pending) {
+      const item = document.createElement("li");
+      const label = document.createElement("span");
+      label.textContent = entry.identity;
+      const trust = document.createElement("button");
+      trust.type = "button";
+      trust.textContent = "Trust";
+      trust.setAttribute("aria-label", `trust device ${entry.identity}`);
+      trust.addEventListener("click", () => {
+        void (async () => {
+          try {
+            await session!.trustDevice(entry.identity);
+            await render();
+          } catch (caught) {
+            showNotice(errorText(caught));
+          }
+        })();
+      });
+      item.append(label, trust);
+      waiting.append(item);
+    }
+    main.append(heading, waiting);
+  }
   screen.append(main);
 }
 
 // --- shared bits ---
+
+/** AGPL source link. The server's configured URL replaces the default. */
+function ensureSourceLink(): void {
+  let footer = document.getElementById("source-link");
+  if (!footer) {
+    footer = document.createElement("footer");
+    footer.id = "source-link";
+    const link = document.createElement("a");
+    link.href = "https://github.com/BITS-Freeware/Thrum";
+    link.textContent = "Source";
+    link.rel = "noreferrer";
+    footer.append(link);
+    document.getElementById("app")?.append(footer);
+  }
+  const link = footer.querySelector("a");
+  if (!link) return;
+  void (async () => {
+    try {
+      const info = await new Api(window.location.origin).serverInfo();
+      if (info.sourceUrl) {
+        link.href = info.sourceUrl;
+      }
+    } catch {
+      // Keep the default repository link when the server is unreachable.
+    }
+  })();
+}
 
 function showNotice(text: string): void {
   const notice = document.createElement("p");
@@ -753,6 +823,7 @@ function startLive(): void {
 
 /** Boot: restore a stored session, then render. */
 void (async () => {
+  ensureSourceLink();
   try {
     session = await CryptoSession.restore(window.location.origin);
   } catch (error) {

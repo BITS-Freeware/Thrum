@@ -13,7 +13,9 @@ use thrum_core::UserName;
 
 use crate::auth;
 use crate::error::ApiError;
-use crate::routes::conversations::{blocked_between, conversation_info, require_admin};
+use crate::routes::conversations::{
+    blocked_between, conversation_info, group_too_large, require_admin,
+};
 use crate::state::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -44,7 +46,31 @@ pub async fn add_members(
                 .map(|(id,)| id)
                 .ok_or_else(|| ApiError::bad_request("unknown_member"))?;
         blocked_between(&state, authed.user_id, id).await?;
-        added.push(id);
+        if !added.contains(&id) {
+            added.push(id);
+        }
+    }
+
+    let (current,): (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM conversation_members WHERE conversation_id = $1")
+            .bind(&conversation_id)
+            .fetch_one(&state.db)
+            .await?;
+    let mut extra = 0usize;
+    for user_id in &added {
+        let already = sqlx::query_as::<_, (i64,)>(
+            "SELECT 1 FROM conversation_members WHERE conversation_id = $1 AND user_id = $2",
+        )
+        .bind(&conversation_id)
+        .bind(user_id)
+        .fetch_optional(&state.db)
+        .await?;
+        if already.is_none() {
+            extra += 1;
+        }
+    }
+    if group_too_large(state.cfg.max_group_members, current as usize + extra) {
+        return Err(ApiError::bad_request("group_too_large"));
     }
 
     for user_id in added {

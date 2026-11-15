@@ -4,6 +4,13 @@ use serde_json::Value;
 
 use crate::session::Session;
 
+/// One-time key-package stock plus whether a last-resort package is stored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyPackageStock {
+    pub count: i64,
+    pub last_resort: bool,
+}
+
 /// A thin client over the server's HTTPS JSON API.
 #[derive(Debug, Clone)]
 pub struct Client {
@@ -308,8 +315,9 @@ impl Client {
         Self::checked(response).await.map(|_| ())
     }
 
-    /// How many key packages the caller's device still has in stock.
-    pub async fn key_package_count(&self, token: &str) -> Result<i64, String> {
+    /// How many one-time key packages the caller's device still has, and
+    /// whether a last-resort package is stored.
+    pub async fn key_package_stock(&self, token: &str) -> Result<KeyPackageStock, String> {
         let response = self
             .http
             .get(format!("{}/v1/key-packages/count", self.base))
@@ -322,9 +330,70 @@ impl Client {
             .json()
             .await
             .map_err(|error| format!("bad count response: {error}"))?;
-        body["count"]
+        let count = body["count"]
             .as_i64()
-            .ok_or_else(|| "server sent no count".to_string())
+            .ok_or_else(|| "server sent no count".to_string())?;
+        Ok(KeyPackageStock {
+            count,
+            last_resort: body["last_resort"].as_bool().unwrap_or(false),
+        })
+    }
+
+    /// Upload the device's last-resort key package. The server keeps it and
+    /// serves it again after the one-time stock is empty.
+    pub async fn upload_last_resort_key_package(
+        &self,
+        token: &str,
+        bytes: &[u8],
+    ) -> Result<(), String> {
+        let response = self
+            .http
+            .post(format!("{}/v1/key-packages", self.base))
+            .bearer_auth(token)
+            .header("content-type", "application/octet-stream")
+            .header("x-thrum-key-package-role", "last-resort")
+            .body(bytes.to_vec())
+            .send()
+            .await
+            .map_err(|error| format!("request failed: {error}"))?;
+        Self::checked(response).await.map(|_| ())
+    }
+
+    /// Device ids of a user that are still signed in, whether or not they
+    /// have a key package left.
+    pub async fn active_devices(&self, token: &str, username: &str) -> Result<Vec<String>, String> {
+        let response = self
+            .http
+            .get(format!("{}/v1/users/{username}/devices", self.base))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|error| format!("request failed: {error}"))?;
+        let response = Self::checked(response).await?;
+        let body: Value = response
+            .json()
+            .await
+            .map_err(|error| format!("bad device list: {error}"))?;
+        Ok(body["devices"]
+            .as_array()
+            .map(|list| {
+                list.iter()
+                    .filter_map(|device| device.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    /// Revoke one of the caller's devices.
+    pub async fn revoke_device(&self, token: &str, device_id: &str) -> Result<(), String> {
+        let response = self
+            .http
+            .delete(format!("{}/v1/devices/{device_id}", self.base))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|error| format!("request failed: {error}"))?;
+        Self::checked(response).await.map(|_| ())
     }
 
     /// Send an opaque payload to a conversation; returns the message id.

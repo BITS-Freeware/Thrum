@@ -66,6 +66,10 @@ test("two users chat live, form a group, and share an encrypted attachment", asy
 
   await register(alice, ALICE);
   await register(bob, BOB);
+  await expect(alice.getByRole("link", { name: "Source" })).toHaveAttribute(
+    "href",
+    "https://github.com/BITS-Freeware/Thrum",
+  );
 
   // --- direct messages ---
 

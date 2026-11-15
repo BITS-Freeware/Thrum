@@ -5,15 +5,19 @@ and trustworthy are welcome.
 
 ## Building and testing
 
+Rust 1.91 (the version in `rust-toolchain.toml`) and Node 22.
+
 ```sh
 cargo fmt --all -- --check   # formatting
 cargo clippy --all-targets -- -D warnings   # lint
 cargo test                   # unit and integration tests
+./scripts/build-wasm.sh      # web client wasm, pinned wasm-bindgen-cli 0.2.130
+(cd web && npm ci && npm run build)
 ```
 
-CI runs exactly these on every push and pull request, plus the web build and
-browser tests once they exist (M6 onward). Please run them locally before
-pushing.
+CI runs the Rust checks, then builds the wasm package from source before the
+web build and the browser tests. Generated wasm is not committed. Please run
+the checks locally before pushing.
 
 ## Fuzzing
 

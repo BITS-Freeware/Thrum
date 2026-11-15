@@ -6,13 +6,39 @@
 
 use std::env;
 
-/// Runtime configuration. Rate limits are per client IP per minute.
+/// The repository operators offer when `THRUM_SOURCE_URL` is unset.
+pub const DEFAULT_SOURCE_URL: &str = "https://github.com/BITS-Freeware/Thrum";
+
+/// Runtime configuration. Rate limits are per client IP per minute unless
+/// a setting says otherwise.
 #[derive(Debug, Clone)]
 pub struct Config {
     /// Maximum registration attempts per IP per minute.
     pub register_per_minute: u32,
     /// Maximum login attempts per IP per minute.
     pub login_per_minute: u32,
+    /// Maximum login attempts per account per minute, on top of the IP limit.
+    pub login_per_account_per_minute: u32,
+    /// Failed logins against one account before the backoff lockout starts.
+    pub login_failures_before_backoff: u32,
+    /// First lockout length, in seconds. Each further failure doubles it.
+    pub login_backoff_base_seconds: u64,
+    /// Longest login lockout, in seconds.
+    pub login_backoff_cap_seconds: u64,
+    /// Proxies whose forwarded client address may be trusted. Empty means
+    /// forwarded headers are ignored.
+    pub trusted_proxies: Vec<String>,
+    /// Key-package fetches per authenticated user per minute.
+    pub key_package_fetch_per_caller_per_minute: u32,
+    /// Key-package fetches of one device per minute.
+    pub key_package_fetch_per_device_per_minute: u32,
+    /// One-time key packages stored per device. The last-resort package
+    /// does not count toward this.
+    pub key_package_max_per_device: u32,
+    /// Members in one conversation, including the creator. Zero means no cap.
+    pub max_group_members: u32,
+    /// Link the web client shows for this server's source code.
+    pub source_url: String,
     /// Largest accepted message payload in bytes.
     pub message_max_bytes: usize,
     /// How long the server keeps undelivered messages, in seconds.
@@ -44,6 +70,16 @@ impl Default for Config {
         Self {
             register_per_minute: 20,
             login_per_minute: 60,
+            login_per_account_per_minute: 10,
+            login_failures_before_backoff: 5,
+            login_backoff_base_seconds: 30,
+            login_backoff_cap_seconds: 15 * 60,
+            trusted_proxies: Vec::new(),
+            key_package_fetch_per_caller_per_minute: 120,
+            key_package_fetch_per_device_per_minute: 60,
+            key_package_max_per_device: 100,
+            max_group_members: 50,
+            source_url: DEFAULT_SOURCE_URL.to_string(),
             message_max_bytes: 256 * 1024,
             queue_ttl_seconds: 7 * 24 * 60 * 60,
             attachment_max_bytes: 20 * 1024 * 1024,
@@ -66,6 +102,50 @@ impl Config {
     /// Unrecognised or unparseable values fall back to the defaults.
     pub fn from_env() -> Self {
         let mut cfg = Self::default();
+        cfg.register_per_minute = env_u32("THRUM_REGISTER_PER_MINUTE", cfg.register_per_minute);
+        cfg.login_per_minute = env_u32("THRUM_LOGIN_PER_MINUTE", cfg.login_per_minute);
+        cfg.login_per_account_per_minute = env_u32(
+            "THRUM_LOGIN_PER_ACCOUNT_PER_MINUTE",
+            cfg.login_per_account_per_minute,
+        );
+        cfg.login_failures_before_backoff = env_u32(
+            "THRUM_LOGIN_FAILURES_BEFORE_BACKOFF",
+            cfg.login_failures_before_backoff,
+        );
+        cfg.login_backoff_base_seconds = env_u64(
+            "THRUM_LOGIN_BACKOFF_BASE_SECONDS",
+            cfg.login_backoff_base_seconds,
+        );
+        cfg.login_backoff_cap_seconds = env_u64(
+            "THRUM_LOGIN_BACKOFF_CAP_SECONDS",
+            cfg.login_backoff_cap_seconds,
+        );
+        if let Ok(value) = env::var("THRUM_TRUSTED_PROXIES") {
+            cfg.trusted_proxies = value
+                .split(',')
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+                .map(str::to_string)
+                .collect();
+        }
+        cfg.key_package_fetch_per_caller_per_minute = env_u32(
+            "THRUM_KEY_PACKAGE_FETCH_PER_CALLER_PER_MINUTE",
+            cfg.key_package_fetch_per_caller_per_minute,
+        );
+        cfg.key_package_fetch_per_device_per_minute = env_u32(
+            "THRUM_KEY_PACKAGE_FETCH_PER_DEVICE_PER_MINUTE",
+            cfg.key_package_fetch_per_device_per_minute,
+        );
+        cfg.key_package_max_per_device = env_u32(
+            "THRUM_KEY_PACKAGE_MAX_PER_DEVICE",
+            cfg.key_package_max_per_device,
+        );
+        cfg.max_group_members = env_u32("THRUM_MAX_GROUP_MEMBERS", cfg.max_group_members);
+        if let Ok(value) = env::var("THRUM_SOURCE_URL")
+            && !value.trim().is_empty()
+        {
+            cfg.source_url = value;
+        }
         if let Ok(v) = env::var("THRUM_ATTACHMENT_MAX_BYTES") {
             cfg.attachment_max_bytes = v.parse().unwrap_or(cfg.attachment_max_bytes);
         }
@@ -97,5 +177,19 @@ impl Config {
             cfg.s3_secret_key = v;
         }
         cfg
+    }
+}
+
+fn env_u32(name: &str, default: u32) -> u32 {
+    match env::var(name) {
+        Ok(value) => value.parse().unwrap_or(default),
+        Err(_) => default,
+    }
+}
+
+fn env_u64(name: &str, default: u64) -> u64 {
+    match env::var(name) {
+        Ok(value) => value.parse().unwrap_or(default),
+        Err(_) => default,
     }
 }

@@ -244,11 +244,23 @@ async fn a_second_device_joins_existing_conversations() {
         "login bob2",
     );
 
-    // Bob's first device runs sync, which adds the new device to the group.
-    expect_ok(
-        &run_cli(&["--server", &base, "--state-file", &bob1, "sync"]),
-        "sync",
+    // A device that appears after the account was added stays out of the
+    // group until the user trusts it.
+    let who = run_as(&base, &bob2, &["whoami"]);
+    let device_id = who
+        .rsplit("device ")
+        .next()
+        .expect("device id")
+        .trim()
+        .trim_end_matches(')');
+    let identity = format!("bob#{device_id}");
+    let pending = run_cli(&["--server", &base, "--state-file", &bob1, "sync"]);
+    let pending_err = String::from_utf8_lossy(&pending.stderr);
+    assert!(
+        pending.status.success() && pending_err.contains(&identity),
+        "pending notice: {pending_err:?}"
     );
+    run_as(&base, &bob1, &["trust", "--device", &identity]);
     let joined = recv_until(&base, &bob2, "joined", 4);
     assert!(joined.contains(&conversation));
 

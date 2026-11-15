@@ -8,6 +8,7 @@ pub mod attachment;
 pub mod envelope;
 pub mod mls;
 pub mod protocol;
+pub mod roster;
 
 /// Errors returned by core operations.
 #[derive(Debug, Clone, PartialEq, Eq)]

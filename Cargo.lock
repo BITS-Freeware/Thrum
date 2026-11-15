@@ -3675,7 +3675,7 @@ dependencies = [
 
 [[package]]
 name = "thrum-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
  "clap",
@@ -3696,7 +3696,7 @@ dependencies = [
 
 [[package]]
 name = "thrum-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",
@@ -3714,7 +3714,7 @@ dependencies = [
 
 [[package]]
 name = "thrum-server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "argon2",
  "async-trait",
@@ -3740,7 +3740,7 @@ dependencies = [
 
 [[package]]
 name = "thrum-wasm"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
  "js-sys",

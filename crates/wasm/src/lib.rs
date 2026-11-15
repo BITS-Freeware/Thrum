@@ -63,10 +63,19 @@ impl DeviceState {
         self.inner.username().to_string()
     }
 
-    /// A fresh serialized key package for this device.
+    /// A fresh serialized one-time key package for this device.
     pub fn new_key_package(&self) -> Result<Uint8Array, JsValue> {
         self.inner
             .new_key_package()
+            .map(|bytes| array(&bytes))
+            .map_err(js_error)
+    }
+
+    /// A last-resort key package. The server keeps it and serves it again
+    /// after the one-time stock is empty.
+    pub fn new_last_resort_key_package(&self) -> Result<Uint8Array, JsValue> {
+        self.inner
+            .new_last_resort_key_package()
             .map(|bytes| array(&bytes))
             .map_err(js_error)
     }
@@ -177,6 +186,58 @@ impl DeviceState {
 }
 
 /// Output of `add_members` is built inline; no struct needed.
+/// Identities in the group whose account is no longer a server member.
+/// Returns a JS array of identity strings. The caller's own identity is omitted.
+#[wasm_bindgen]
+pub fn departed_members(
+    self_identity: &str,
+    group_members: Vec<String>,
+    server_members: Vec<String>,
+) -> js_sys::Array {
+    let array = js_sys::Array::new();
+    for identity in core::roster::departed_members(self_identity, &group_members, &server_members) {
+        array.push(&identity.into());
+    }
+    array
+}
+
+/// Plan adds, pending approvals, and removals for one account.
+///
+/// Returns an array of `{ kind: "add" | "pending" | "remove", identity }`.
+#[wasm_bindgen]
+pub fn plan_roster(
+    self_identity: &str,
+    group_members: Vec<String>,
+    username: &str,
+    active_device_ids: Vec<String>,
+    trusted: Vec<String>,
+    admit_untrusted: bool,
+    known_account: bool,
+) -> js_sys::Array {
+    let trusted: std::collections::BTreeSet<String> = trusted.into_iter().collect();
+    let array = js_sys::Array::new();
+    for action in core::roster::plan_roster(
+        self_identity,
+        &group_members,
+        username,
+        &active_device_ids,
+        &trusted,
+        admit_untrusted,
+        known_account,
+    ) {
+        let (kind, identity) = match action {
+            core::roster::RosterAction::Add(identity) => ("add", identity),
+            core::roster::RosterAction::Pending(identity) => ("pending", identity),
+            core::roster::RosterAction::Remove(identity) => ("remove", identity),
+        };
+        let entry = js_sys::Object::new();
+        let _ = js_sys::Reflect::set(&entry, &"kind".into(), &kind.into());
+        let _ = js_sys::Reflect::set(&entry, &"identity".into(), &identity.into());
+        array.push(&entry);
+    }
+    array
+}
+
 /// Generate fresh key material for a new device identity
 /// (`username#device-id`).
 #[wasm_bindgen]

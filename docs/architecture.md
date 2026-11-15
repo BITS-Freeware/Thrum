@@ -29,7 +29,8 @@ content.
 
 1. A device registers its account, then uploads MLS key packages (RFC 9420).
 2. To start a conversation with someone, a client fetches one key package for
-   each target device from the server's key package directory.
+   each target device from the server's key package directory. That fetch
+   requires the caller's session.
 3. The initiating client builds the MLS group (a two-member group for a
    one-to-one chat) and sends the MLS commit and welcome messages through the
    server. The server checks membership requests against its conversation

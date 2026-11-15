@@ -46,6 +46,37 @@ pub async fn list(
     Ok(Json(devices))
 }
 
+/// `GET /v1/users/{username}/devices`: ids of a user's devices that are
+/// still signed in. Clients compare this with the MLS roster to drop
+/// revoked devices. Unknown usernames are 404.
+pub async fn list_active(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(username): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    auth::authenticate(&state, &headers).await?;
+    let rows = sqlx::query_as::<_, (String,)>(
+        "SELECT d.id FROM devices d
+         JOIN users u ON u.id = d.user_id
+         WHERE lower(u.username) = lower($1) AND d.revoked_at IS NULL
+         ORDER BY d.created_at, d.id",
+    )
+    .bind(&username)
+    .fetch_all(&state.db)
+    .await?;
+    let known =
+        sqlx::query_as::<_, (i64,)>("SELECT 1 FROM users WHERE lower(username) = lower($1)")
+            .bind(&username)
+            .fetch_optional(&state.db)
+            .await?;
+    if known.is_none() {
+        return Err(ApiError::not_found());
+    }
+    Ok(Json(
+        serde_json::json!({ "devices": rows.into_iter().map(|(id,)| id).collect::<Vec<_>>() }),
+    ))
+}
+
 /// `DELETE /v1/devices/{device_id}`: revoke one of the caller's devices.
 /// Idempotent; unknown devices and other users' devices are both 404.
 pub async fn revoke(

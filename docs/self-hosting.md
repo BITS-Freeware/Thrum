@@ -9,6 +9,7 @@ directory.
 ## Requirements
 
 - Linux, macOS, or any POSIX system (or Docker)
+- Rust 1.91 and Node 22 when building from source
 - No database server required: SQLite is the default backend
 - PostgreSQL 14+ if you prefer it (see below)
 
@@ -20,9 +21,26 @@ cd Thrum
 docker compose up -d --build
 ```
 
-The server listens on port 8080 and keeps everything in the
-`thrum-data` volume. Open `http://your-host:8080/` for the web client,
-or point the CLI at `http://your-host:8080`.
+Compose publishes the server on `127.0.0.1:8080` only. On the same
+machine, open `http://127.0.0.1:8080/` for the web client, or point the
+CLI at `http://127.0.0.1:8080`. Data stays in the `thrum-data` volume.
+
+The container starts as root long enough to give `/data` to user `thrum`
+(uid 10001), then the server runs as that user. If you start the binary
+yourself against an existing volume, that user must be able to write it:
+
+```sh
+sudo chown -R 10001:10001 /path/to/data
+```
+
+Do not publish port 8080 on a public interface. The server speaks plain
+HTTP, so a public listener sends passwords and session tokens in the
+clear. Put Caddy, nginx, or another TLS proxy in front of it first; the
+section below has an nginx example. The image sets `THRUM_BIND=0.0.0.0`
+so the process can accept the proxy's connection from outside the
+container's network namespace. A binary you start yourself listens on
+`127.0.0.1` unless you set `THRUM_BIND`, and it prints a warning when
+that address is not a loopback address.
 
 To run on PostgreSQL instead of SQLite:
 
@@ -34,8 +52,10 @@ docker compose --profile postgres up -d
 
 ## From source
 
-Building needs a Rust toolchain (2024 edition) and Node 22 for the web
-client. The web client is optional; the CLI works without it.
+Building needs Rust 1.91 (`rust-toolchain.toml` selects it) and Node 22
+for the web client. The web client is optional; the CLI works without it.
+The wasm package is built from the `thrum-wasm` crate; it is not stored
+in git.
 
 ```sh
 git clone https://github.com/BITS-Freeware/Thrum.git
@@ -43,6 +63,7 @@ cd Thrum
 cargo build --release -p thrum-server -p thrum-cli
 
 # optional: build the web client and serve it from the server
+./scripts/build-wasm.sh
 (cd web && npm ci && npm run build)
 
 THRUM_DB=/var/lib/thrum/thrum.sqlite \
@@ -64,7 +85,7 @@ back to the default shown.
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `THRUM_DB` | `thrum.sqlite` | SQLite file path, or a `postgres://` URL |
-| `THRUM_BIND` | `0.0.0.0` | Address to listen on (`127.0.0.1` for local only) |
+| `THRUM_BIND` | `127.0.0.1` | Address to listen on. The container image sets `0.0.0.0` |
 | `THRUM_PORT` | `8080` | Port to listen on |
 | `THRUM_WEB_DIR` | unset | Serve the built web client from this directory |
 | `THRUM_ATTACHMENT_MAX_BYTES` | `20971520` | Largest accepted blob, bytes (20 MiB) |
@@ -77,6 +98,26 @@ back to the default shown.
 | `THRUM_S3_REGION` | unset | Region (e.g. `auto` for R2) |
 | `THRUM_S3_ACCESS_KEY_ID` | unset | Access key id |
 | `THRUM_S3_SECRET_ACCESS_KEY` | unset | Secret access key |
+| `THRUM_REGISTER_PER_MINUTE` | `20` | Registrations per client address per minute |
+| `THRUM_LOGIN_PER_MINUTE` | `60` | Login attempts per client address per minute |
+| `THRUM_LOGIN_PER_ACCOUNT_PER_MINUTE` | `10` | Login attempts per account per minute |
+| `THRUM_LOGIN_FAILURES_BEFORE_BACKOFF` | `5` | Failed passwords before the account delay starts |
+| `THRUM_LOGIN_BACKOFF_BASE_SECONDS` | `30` | First account delay; it doubles after each further failure |
+| `THRUM_LOGIN_BACKOFF_CAP_SECONDS` | `900` | Longest account delay |
+| `THRUM_TRUSTED_PROXIES` | empty | Comma-separated CIDRs. `X-Forwarded-For` and `Forwarded` are read only when the immediate peer is in this list; the client address is the rightmost address that is not |
+| `THRUM_KEY_PACKAGE_FETCH_PER_CALLER_PER_MINUTE` | `120` | Key-package fetches per logged-in user per minute |
+| `THRUM_KEY_PACKAGE_FETCH_PER_DEVICE_PER_MINUTE` | `60` | Key-package fetches per target device per minute |
+| `THRUM_KEY_PACKAGE_MAX_PER_DEVICE` | `100` | One-time key packages stored per device (`0` is unlimited). One last-resort package is extra and is not deleted |
+| `THRUM_MAX_GROUP_MEMBERS` | `50` | Members per conversation, including the creator (`0` is unlimited) |
+| `THRUM_SOURCE_URL` | the Thrum repository | Link the web client shows for this server's source (AGPL) |
+
+New invites expire after 7 days and can be redeemed once. A create
+request can set `ttl_seconds` or `max_uses` to `0` for no expiry or
+unlimited redemptions. Invites created before 0.2.0 stay unlimited.
+
+The web client and the API send `Content-Security-Policy`,
+`X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, and
+`X-Frame-Options: DENY`. `GET /v1/meta` returns the configured source URL.
 
 Messages the server queues for offline devices are deleted after seven
 days; clients fetch everything they missed when they reconnect. The
@@ -115,9 +156,10 @@ job (keys are opaque ciphertext).
 
 ## TLS and reverse proxy
 
-The server speaks plain HTTP; put it behind a TLS-terminating proxy for
-anything reachable from the internet. WebSocket connections to `/ws`
-must be proxied with upgrade support. For nginx:
+The server speaks plain HTTP. Anything reachable from another machine
+needs a TLS-terminating proxy in front of it. Serving port 8080 directly
+on a public address exposes passwords and session tokens. WebSocket
+connections to `/ws` must be proxied with upgrade support. For nginx:
 
 ```nginx
 location / {

@@ -10,6 +10,7 @@ import {
   decodePayload,
   decodeServerFrame,
   decryptFile,
+  departed_members,
   deviceFromJson,
   encodeAppMessage,
   encodeClientFrame,
@@ -17,6 +18,7 @@ import {
   encryptFile,
   newFileKey,
   new_device,
+  plan_roster,
   type DeviceState,
 } from "./wasm/thrum_wasm.js";
 import { initWasm } from "./wasmModule";
@@ -26,9 +28,11 @@ import {
   getMessage,
   loadConversations,
   loadDeviceJson,
+  loadMeta,
   saveDeviceJson,
   saveConversation,
   saveMessage,
+  saveMeta,
   type StoredAttachment,
   type StoredMessage,
 } from "./db";
@@ -133,13 +137,17 @@ export class CryptoSession {
     await saveDeviceJson(this.session.username, this.device.toJSON());
   }
 
-  /** Keep at least `keyPackageTarget` key packages with the server. */
+  /** Keep at least `keyPackageTarget` one-time packages, plus one last-resort package. */
   async topUpKeyPackages(): Promise<void> {
     if (!this.device) throw new Error("not logged in");
-    const count = await this.api.keyPackageCount();
-    for (let i = count; i < this.keyPackageTarget; i += 1) {
+    const stock = await this.api.keyPackageStock();
+    if (!stock.lastResort) {
+      await this.api.uploadKeyPackage(this.device.new_last_resort_key_package(), true);
+    }
+    for (let i = stock.count; i < this.keyPackageTarget; i += 1) {
       await this.api.uploadKeyPackage(this.device.new_key_package());
     }
+    await this.persist();
   }
 
   /** Log out: revoke the session on the server and drop the keys. */
@@ -166,7 +174,7 @@ export class CryptoSession {
     this.device.create_group(created.id);
     await this.persist();
     await saveConversation({ id: created.id, members: created.members, name: name ?? null });
-    await this.syncGroup(created.id, created.members);
+    await this.syncGroup(created.id, created.members, new Set(created.members));
     return created.id;
   }
 
@@ -178,41 +186,111 @@ export class CryptoSession {
   }
 
   /**
-   * Bring one conversation's MLS group in line with the server's member
-   * list: every device of every member missing from the group gets added
-   * with one commit and one welcome.
+   * Bring one conversation's MLS group in line with the server.
+   *
+   * Usernames in `admit` have their current devices added without a prior
+   * approval: the user just named them. Any other new device is kept pending
+   * until `trustDevice`. Revoked devices and departed accounts are removed.
    */
-  async syncGroup(conversationId: string, members: string[]): Promise<void> {
+  async syncGroup(
+    conversationId: string,
+    members: string[],
+    admit: ReadonlySet<string> = new Set(),
+  ): Promise<void> {
     if (!this.device || !this.session) throw new Error("not logged in");
-    const roster = this.device.group_members(conversationId) as unknown as string[];
-    const packages: { deviceId: string; bytes: Uint8Array; identity: string }[] = [];
+    const roster = [...(this.device.group_members(conversationId) as unknown as string[])];
+    const trusted = await loadTrusted();
+    const known = await loadKnown(conversationId);
+    const packages: Uint8Array[] = [];
+    const added: string[] = [];
+    const pending: string[] = [];
+    const removals = [
+      ...(departed_members(this.identity, roster, members) as unknown as string[]),
+    ];
     for (const member of members) {
-      const deviceIds = await this.api.devicesWithKeyPackages(member);
-      for (const deviceId of deviceIds) {
-        const identity = `${member}#${deviceId}`;
-        if (roster.includes(identity) || identity === this.identity) continue;
-        const packageBytes = await this.api.fetchKeyPackage(deviceId);
-        if (!packageBytes) continue;
-        const claimed = this.device.key_package_identity(packageBytes);
-        if (claimed !== identity) {
-          throw new Error(`server returned a key package for ${claimed} instead of ${identity}`);
+      const active = await this.api.activeDevices(member);
+      const admitMember = [...admit].some((name) => name.toLowerCase() === member.toLowerCase());
+      const seen = [...known].some((name) => name.toLowerCase() === member.toLowerCase());
+      const actions = plan_roster(
+        this.identity,
+        roster,
+        member,
+        active,
+        [...trusted],
+        admitMember,
+        seen,
+      ) as unknown as { kind: string; identity: string }[];
+      for (const action of actions) {
+        if (action.kind === "remove") removals.push(action.identity);
+        else if (action.kind === "pending") pending.push(action.identity);
+        else if (action.kind === "add") {
+          trusted.add(action.identity);
+          const deviceId = action.identity.slice(action.identity.indexOf("#") + 1);
+          const packageBytes = await this.api.fetchKeyPackage(deviceId);
+          if (!packageBytes) continue;
+          const claimed = this.device.key_package_identity(packageBytes);
+          if (claimed !== action.identity) {
+            throw new Error(
+              `server returned a key package for ${claimed} instead of ${action.identity}`,
+            );
+          }
+          packages.push(packageBytes);
+          added.push(action.identity);
         }
-        packages.push({ deviceId, bytes: packageBytes, identity });
+      }
+      const inGroup = roster.some((identity) => identity.toLowerCase().startsWith(`${member.toLowerCase()}#`));
+      if (active.length > 0 || inGroup) known.add(member);
+    }
+    await saveTrusted(trusted);
+    await saveKnown(conversationId, known);
+    await savePending(conversationId, pending);
+    for (const identity of removals) {
+      try {
+        const commit = this.device.remove_member(conversationId, identity);
+        await this.persist();
+        await this.api.sendMessage(conversationId, encodeEnvelope("mls", commit));
+        await this.noteRoster(conversationId, `${identity} left this conversation`);
+      } catch {
+        // Another member may already have removed this device.
       }
     }
     if (packages.length === 0) return;
-    const result = this.device.add_members(
-      conversationId,
-      packages.map((entry) => entry.bytes),
-    ) as unknown as { commit: Uint8Array; welcome: Uint8Array | null };
+    const result = this.device.add_members(conversationId, packages) as unknown as {
+      commit: Uint8Array;
+      welcome: Uint8Array | null;
+    };
     await this.persist();
     if (result.welcome) {
-      await this.api.sendMessage(
-        conversationId,
-        encodeEnvelope("welcome", result.welcome),
-      );
+      await this.api.sendMessage(conversationId, encodeEnvelope("welcome", result.welcome));
     }
     await this.api.sendMessage(conversationId, encodeEnvelope("mls", result.commit));
+    for (const identity of added) {
+      await this.noteRoster(conversationId, `${identity} joined this conversation`);
+    }
+  }
+
+  /** Device identities waiting for approval, across conversations. */
+  async pendingDevices(): Promise<{ conversationId: string; identity: string }[]> {
+    const raw = await loadMeta("pending-devices");
+    if (!raw) return [];
+    try {
+      const parsed = JSON.parse(raw) as Record<string, string[]>;
+      const rows: { conversationId: string; identity: string }[] = [];
+      for (const [conversationId, identities] of Object.entries(parsed)) {
+        for (const identity of identities) rows.push({ conversationId, identity });
+      }
+      return rows;
+    } catch {
+      return [];
+    }
+  }
+
+  /** Approve a device identity and add it to the groups it is waiting on. */
+  async trustDevice(identity: string): Promise<void> {
+    const trusted = await loadTrusted();
+    trusted.add(identity);
+    await saveTrusted(trusted);
+    await this.sync();
   }
 
   /** Refresh the conversation list from the server and sync every group. */
@@ -227,7 +305,7 @@ export class CryptoSession {
         name: conversation.name ?? null,
       });
       if (this.device.has_group(conversation.id)) {
-        await this.syncGroup(conversation.id, conversation.members);
+        await this.syncGroup(conversation.id, conversation.members, new Set());
       }
     }
   }
@@ -377,7 +455,7 @@ export class CryptoSession {
   async addMembers(conversationId: string, members: string[]): Promise<string[]> {
     const all = await this.api.addMembers(conversationId, members);
     await this.refreshConversation(conversationId);
-    await this.syncGroup(conversationId, all);
+    await this.syncGroup(conversationId, all, new Set(members));
     return all;
   }
 
@@ -385,7 +463,7 @@ export class CryptoSession {
   async removeMember(conversationId: string, username: string): Promise<void> {
     await this.api.removeMember(conversationId, username);
     await this.refreshConversation(conversationId);
-    await this.syncGroup(conversationId, await this.memberList(conversationId));
+    await this.syncGroup(conversationId, await this.memberList(conversationId), new Set());
   }
 
   /** Rename a conversation (admin). */
@@ -544,6 +622,7 @@ export class CryptoSession {
       console.warn("message", messageId, "arrived before its group; leaving un-acked");
       return false;
     }
+    const before = [...(this.device.group_members(conversationId) as unknown as string[])];
     let incoming: { kind: string; sender?: string; payload?: Uint8Array };
     try {
       incoming = (await this.device.process_incoming(
@@ -557,7 +636,9 @@ export class CryptoSession {
       return false;
     }
     if (incoming.kind === "commit") {
+      const after = [...(this.device.group_members(conversationId) as unknown as string[])];
       await this.persist();
+      await this.noteRosterDiff(conversationId, before, after);
       this.notify();
       return true;
     }
@@ -657,4 +738,91 @@ export class CryptoSession {
   static toBase64(bytes: Uint8Array): string {
     return toBase64(bytes);
   }
+
+  private async noteRoster(conversationId: string, text: string): Promise<void> {
+    await saveMessage({
+      conversationId,
+      messageId: `local-${text}`,
+      sender: "thrum",
+      text,
+      edited: false,
+      deleted: false,
+      createdAt: Date.now(),
+      replyTo: null,
+      attachment: null,
+      readBy: [],
+    });
+  }
+
+  private async noteRosterDiff(
+    conversationId: string,
+    before: string[],
+    after: string[],
+  ): Promise<void> {
+    for (const identity of after) {
+      if (!before.includes(identity)) {
+        await this.noteRoster(conversationId, `${identity} joined this conversation`);
+      }
+    }
+    for (const identity of before) {
+      if (!after.includes(identity)) {
+        await this.noteRoster(conversationId, `${identity} left this conversation`);
+      }
+    }
+  }
+}
+
+async function loadTrusted(): Promise<Set<string>> {
+  const raw = await loadMeta("trusted-devices");
+  if (!raw) return new Set();
+  try {
+    return new Set(JSON.parse(raw) as string[]);
+  } catch {
+    return new Set();
+  }
+}
+
+async function saveTrusted(trusted: Set<string>): Promise<void> {
+  await saveMeta("trusted-devices", JSON.stringify([...trusted]));
+}
+
+async function loadKnown(conversationId: string): Promise<Set<string>> {
+  const raw = await loadMeta("known-accounts");
+  if (!raw) return new Set();
+  try {
+    const parsed = JSON.parse(raw) as Record<string, string[]>;
+    return new Set(parsed[conversationId] ?? []);
+  } catch {
+    return new Set();
+  }
+}
+
+async function saveKnown(conversationId: string, names: Set<string>): Promise<void> {
+  const raw = await loadMeta("known-accounts");
+  let known: Record<string, string[]> = {};
+  if (raw) {
+    try {
+      known = JSON.parse(raw) as Record<string, string[]>;
+    } catch {
+      known = {};
+    }
+  }
+  if (names.size === 0) delete known[conversationId];
+  else known[conversationId] = [...names];
+  await saveMeta("known-accounts", JSON.stringify(known));
+}
+
+async function savePending(conversationId: string, identities: string[]): Promise<void> {
+  const raw = await loadMeta("pending-devices");
+  let pending: Record<string, string[]> = {};
+  if (raw) {
+    try {
+      pending = JSON.parse(raw) as Record<string, string[]>;
+    } catch {
+      pending = {};
+    }
+  }
+  if (identities.length === 0) delete pending[conversationId];
+  else pending[conversationId] = identities;
+  await saveMeta("pending-devices", JSON.stringify(pending));
 }

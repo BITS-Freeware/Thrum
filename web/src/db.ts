@@ -9,7 +9,7 @@
 import type { Session } from "./api";
 
 const DB_NAME = "thrum";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 export interface StoredMessage {
   conversationId: string;
@@ -61,6 +61,7 @@ function open(): Promise<IDBDatabase> {
         const store = db.createObjectStore("messages", { keyPath: ["conversationId", "messageId"] });
         store.createIndex("byConversation", "conversationId");
       }
+      if (!db.objectStoreNames.contains("meta")) db.createObjectStore("meta");
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
@@ -176,11 +177,24 @@ export async function loadMessages(conversationId: string): Promise<StoredMessag
   );
 }
 
+export async function loadMeta(key: string): Promise<string | null> {
+  return (await withStore<string | undefined>("meta", "readonly", (store) => store.get(key))) ?? null;
+}
+
+export async function saveMeta(key: string, value: string): Promise<void> {
+  await withStore("meta", "readwrite", (store) => {
+    store.put(value, key);
+  });
+}
+
 export async function wipeEverything(): Promise<void> {
   const db = await open();
   await new Promise<void>((resolve, reject) => {
-    const tx = db.transaction(["session", "keys", "conversations", "messages"], "readwrite");
-    for (const name of ["session", "keys", "conversations", "messages"]) {
+    const tx = db.transaction(
+      ["session", "keys", "conversations", "messages", "meta"],
+      "readwrite",
+    );
+    for (const name of ["session", "keys", "conversations", "messages", "meta"]) {
       tx.objectStore(name).clear();
     }
     tx.oncomplete = () => resolve();
