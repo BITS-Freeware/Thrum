@@ -273,9 +273,34 @@ impl DeviceCrypto {
         member_identity(credential)
     }
 
-    /// A fresh serialized key package for this device.
+    /// A fresh one-time key package for this device.
     pub fn new_key_package(&self) -> Result<Vec<u8>, MlsError> {
-        let bundle = KeyPackage::builder()
+        self.build_key_package(false)
+    }
+
+    /// A last-resort key package. OpenMLS keeps its init key after a join,
+    /// so the server can hand the same package out again once the one-time
+    /// stock is gone.
+    pub fn new_last_resort_key_package(&self) -> Result<Vec<u8>, MlsError> {
+        self.build_key_package(true)
+    }
+
+    fn build_key_package(&self, last_resort: bool) -> Result<Vec<u8>, MlsError> {
+        let mut builder = KeyPackage::builder();
+        if last_resort {
+            // The leaf has to advertise the extension or the commit that adds
+            // this package is rejected.
+            builder = builder
+                .mark_as_last_resort()
+                .leaf_node_capabilities(Capabilities::new(
+                    None,
+                    None,
+                    Some(&[ExtensionType::LastResort]),
+                    None,
+                    None,
+                ));
+        }
+        let bundle = builder
             .build(
                 CIPHERSUITE,
                 &self.provider,
@@ -691,5 +716,32 @@ mod tests {
         );
         assert_eq!(split_identity("nodigit"), None);
         assert_eq!(split_identity("#device-1"), None);
+    }
+
+    /// A last-resort package can join more than one group. That is what
+    /// lets a device be added after its one-time packages are gone.
+    #[test]
+    fn last_resort_key_package_joins_a_second_group() {
+        let alice = device("alice", 1);
+        let bob = device("bob", 1);
+        let package = bob.new_last_resort_key_package().expect("last resort");
+
+        alice.create_group("conv-1").expect("create");
+        let (_commit, welcome) = alice
+            .add_members("conv-1", std::slice::from_ref(&package))
+            .expect("first add");
+        assert_eq!(
+            bob.process_welcome(&welcome.expect("welcome"))
+                .expect("join"),
+            "conv-1"
+        );
+
+        alice.create_group("conv-2").expect("create");
+        let (_commit, welcome) = alice.add_members("conv-2", &[package]).expect("second add");
+        assert_eq!(
+            bob.process_welcome(&welcome.expect("welcome"))
+                .expect("rejoin"),
+            "conv-2"
+        );
     }
 }

@@ -7,6 +7,9 @@ pub mod session;
 pub mod store;
 pub mod ws;
 
+#[cfg(test)]
+mod device_security;
+
 use url::Url;
 
 /// Errors from base URL handling.

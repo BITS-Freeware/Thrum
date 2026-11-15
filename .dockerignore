@@ -6,3 +6,6 @@ web/playwright-report/
 .git/
 *.sqlite*
 blobs/
+web/src/wasm/*.js
+web/src/wasm/*.d.ts
+web/src/wasm/*.wasm

@@ -2,6 +2,7 @@
 name = "thrum-server"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Thrum server: accounts, conversation membership and encrypted message relay"

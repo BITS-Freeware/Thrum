@@ -219,6 +219,105 @@ async fn invite_roundtrip() {
 }
 
 #[tokio::test]
+async fn invites_expire_and_honor_a_use_limit() {
+    let app = TestApp::spawn().await;
+    let alice = user(&app, "alice").await;
+    let bob = user(&app, "bob").await;
+    let carol = user(&app, "carol").await;
+    let dave = user(&app, "dave").await;
+    let id = conversation(&app, &alice, &[]).await;
+
+    let response = app
+        .client
+        .post(app.url(&format!("/v1/conversations/{id}/invites")))
+        .bearer_auth(alice["token"].as_str().unwrap())
+        .json(&json!({ "ttl_seconds": 1, "max_uses": 2 }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 201);
+    let body: Value = response.json().await.unwrap();
+    let token = body["token"].as_str().unwrap().to_string();
+    assert_eq!(body["max_uses"], json!(2));
+    assert!(body["expires_at"].as_i64().unwrap() > 0);
+
+    for member in [&bob, &carol] {
+        let response = app
+            .client
+            .post(app.url("/v1/invites/redeem"))
+            .bearer_auth(member["token"].as_str().unwrap())
+            .json(&json!({ "token": token }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+    }
+    let response = app
+        .client
+        .post(app.url("/v1/invites/redeem"))
+        .bearer_auth(dave["token"].as_str().unwrap())
+        .json(&json!({ "token": token }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 404);
+
+    let response = app
+        .client
+        .post(app.url(&format!("/v1/conversations/{id}/invites")))
+        .bearer_auth(alice["token"].as_str().unwrap())
+        .json(&json!({ "ttl_seconds": 1, "max_uses": 5 }))
+        .send()
+        .await
+        .unwrap();
+    let token = response.json::<Value>().await.unwrap()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    let response = app
+        .client
+        .post(app.url("/v1/invites/redeem"))
+        .bearer_auth(dave["token"].as_str().unwrap())
+        .json(&json!({ "token": token }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 404);
+}
+
+#[tokio::test]
+async fn group_member_cap_is_enforced() {
+    let app = TestApp::spawn_with(thrum_server::config::Config {
+        max_group_members: 2,
+        ..thrum_server::config::Config::default()
+    })
+    .await;
+    let alice = user(&app, "alice").await;
+    let _bob = user(&app, "bob").await;
+    let _carol = user(&app, "carol").await;
+    let response = app
+        .client
+        .post(app.url("/v1/conversations"))
+        .bearer_auth(alice["token"].as_str().unwrap())
+        .json(&json!({ "members": ["bob", "carol"], "name": "" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 400);
+    let id = conversation(&app, &alice, &["bob"]).await;
+    let response = app
+        .client
+        .post(app.url(&format!("/v1/conversations/{id}/members")))
+        .bearer_auth(alice["token"].as_str().unwrap())
+        .json(&json!({ "members": ["carol"] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 400);
+}
+
+#[tokio::test]
 async fn blocks_prevent_new_shared_conversations() {
     let app = TestApp::spawn().await;
     let alice = user(&app, "alice").await;

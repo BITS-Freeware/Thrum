@@ -40,13 +40,14 @@ decision here is how Thrum uses it, not which library to use.
      server-side member removal, so the removed member still receives and
      processes it (forward secrecy) before the server stops delivering to
      them.
-   - new device of an existing member: any online device of any member can
-     add it during client sync (server lists a user's devices; the MLS roster
-     says which are already in).
+   - new device of an existing member: decision 0013 replaces the silent
+     add. Devices present when the user adds the account are added then;
+     a device that shows up later stays pending until that user trusts it.
 7. **Key package rotation.** Devices upload a stock of key packages at login
    and top up to the stock level whenever it runs low (`GET
    /v1/key-packages/count` for the caller's own device). Fetching consumes
-   packages, which is the single-use semantics MLS wants.
+   one-time packages. Decision 0013 requires a session for that fetch, caps
+   the one-time stock, and keeps one last-resort package that is not deleted.
 8. **Tolerant receive.** Clients drop MLS messages they cannot process (old
    epochs, messages from before they joined, welcomes meant for another
    device, duplicates). This is required because the relay fan-out and MLS

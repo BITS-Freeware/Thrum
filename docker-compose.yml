@@ -1,8 +1,12 @@
 services:
   thrum:
     build: .
+    # Published on loopback only. Put Caddy, nginx, or another TLS proxy
+    # in front of this service before anyone reaches it from another
+    # machine. The server speaks plain HTTP: a public 8080 sends passwords
+    # and session tokens in the clear.
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     volumes:
       - thrum-data:/data
     environment:

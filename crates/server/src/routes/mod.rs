@@ -10,8 +10,11 @@ pub mod keypackages;
 pub mod members;
 pub mod ws;
 
+use axum::Json;
 use axum::Router;
+use axum::extract::State;
 use axum::routing::{delete, get, patch, post};
+use serde_json::json;
 
 use crate::state::AppState;
 
@@ -19,6 +22,7 @@ use crate::state::AppState;
 pub fn routes(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
+        .route("/v1/meta", get(meta))
         .route("/v1/accounts", post(accounts::register))
         .route("/v1/sessions", post(accounts::login))
         .route("/v1/sessions/current", delete(accounts::logout))
@@ -26,6 +30,7 @@ pub fn routes(state: AppState) -> Router {
         .route("/v1/account", delete(accounts::delete_account))
         .route("/v1/devices", get(devices::list))
         .route("/v1/devices/{device_id}", delete(devices::revoke))
+        .route("/v1/users/{username}/devices", get(devices::list_active))
         .route(
             "/v1/devices/{device_id}/key-package",
             get(keypackages::fetch),
@@ -83,4 +88,10 @@ pub fn routes(state: AppState) -> Router {
 
 async fn healthz() -> &'static str {
     "ok"
+}
+
+/// `GET /v1/meta`: public server facts the web client shows, including the
+/// link to this server's source (AGPL).
+async fn meta(State(state): State<AppState>) -> Json<serde_json::Value> {
+    Json(json!({ "source_url": state.cfg.source_url }))
 }

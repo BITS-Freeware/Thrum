@@ -3,8 +3,9 @@ resolver = "2"
 members = ["crates/core", "crates/server", "crates/cli", "crates/wasm"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
+rust-version = "1.91"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/BITS-Freeware/Thrum"
 

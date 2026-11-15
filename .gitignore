@@ -7,3 +7,8 @@
 *.sqlite-wal
 thrum-state.json
 blobs/
+/web/src/wasm/thrum_wasm.js
+/web/src/wasm/thrum_wasm.d.ts
+/web/src/wasm/thrum_wasm_bg.wasm
+/web/src/wasm/thrum_wasm_bg.wasm.d.ts
+/web/src/wasm/snippets/

@@ -1,6 +1,7 @@
 //! Chat orchestration: ties the HTTP API, the WebSocket relay and the MLS
 //! layer together for the CLI commands.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -11,6 +12,7 @@ use sha2::{Digest, Sha256};
 use thrum_core::attachment::{FileKey, KEY_LEN, NONCE_LEN};
 use thrum_core::envelope::{AppMessage, Envelope, decode_envelope, encode_envelope};
 use thrum_core::mls::{DeviceCrypto, Incoming};
+use thrum_core::roster::{RosterAction, departed_members, plan_roster};
 
 use crate::api::Client;
 use crate::session::Session;
@@ -20,6 +22,31 @@ use crate::store::{AttachmentMeta, Store};
 const KEY_PACKAGE_MIN: i64 = 4;
 /// Keep at most this many key packages on the server.
 const KEY_PACKAGE_STOCK: i64 = 8;
+
+/// What a sync changed in one or more conversations.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct SyncReport {
+    pub added: Vec<String>,
+    pub removed: Vec<String>,
+    pub pending: Vec<String>,
+}
+
+impl SyncReport {
+    fn push(&mut self, conversation_id: &str, kind: &str, identity: &str) {
+        let line = format!("{kind} {identity} in {conversation_id}");
+        match kind {
+            "added" => self.added.push(line),
+            "removed" => self.removed.push(line),
+            _ => self.pending.push(line),
+        }
+    }
+
+    fn log(&self) {
+        for line in self.removed.iter().chain(&self.added).chain(&self.pending) {
+            eprintln!("{line}");
+        }
+    }
+}
 
 /// Everything one logged-in device needs to chat.
 pub struct Chat {
@@ -83,20 +110,29 @@ impl Chat {
             .map_err(|error| error.to_string())
     }
 
-    /// Upload key packages until the server holds a healthy stock.
+    /// Upload key packages until the server holds a healthy stock, including
+    /// one last-resort package that survives a drain.
     pub async fn top_up_key_packages(&self) -> Result<(), String> {
-        let count = self.client.key_package_count(&self.session.token).await?;
-        if count >= KEY_PACKAGE_MIN {
-            return Ok(());
-        }
-        for _ in count..KEY_PACKAGE_STOCK {
+        let stock = self.client.key_package_stock(&self.session.token).await?;
+        if !stock.last_resort {
             let package = self
                 .crypto
-                .new_key_package()
+                .new_last_resort_key_package()
                 .map_err(|error| error.to_string())?;
             self.client
-                .upload_key_package(&self.session.token, &package)
+                .upload_last_resort_key_package(&self.session.token, &package)
                 .await?;
+        }
+        if stock.count < KEY_PACKAGE_MIN {
+            for _ in stock.count..KEY_PACKAGE_STOCK {
+                let package = self
+                    .crypto
+                    .new_key_package()
+                    .map_err(|error| error.to_string())?;
+                self.client
+                    .upload_key_package(&self.session.token, &package)
+                    .await?;
+            }
         }
         // Each generated package carries the private keys that will later
         // unwrap a Welcome; they must reach disk before the process ends.
@@ -118,7 +154,11 @@ impl Chat {
             .create_group(&conversation_id)
             .map_err(|error| error.to_string())?;
         self.persist()?;
-        self.sync_group(&conversation_id, &all_members).await?;
+        let admit: HashSet<String> = all_members.iter().cloned().collect();
+        let report = self
+            .sync_group(&conversation_id, &all_members, &admit)
+            .await?;
+        report.log();
         Ok(conversation_id)
     }
 
@@ -133,7 +173,11 @@ impl Chat {
             .client
             .add_members(&self.session.token, conversation_id, members)
             .await?;
-        self.sync_group(conversation_id, &all_members).await?;
+        let admit: HashSet<String> = members.iter().cloned().collect();
+        let report = self
+            .sync_group(conversation_id, &all_members, &admit)
+            .await?;
+        report.log();
         Ok(())
     }
 
@@ -230,48 +274,157 @@ impl Chat {
         Ok(commit)
     }
 
-    /// Bring one conversation's MLS group in line with the server's member
-    /// list: every device of every member that is missing from the group gets
-    /// added with one commit and one welcome.
-    async fn sync_group(&self, conversation_id: &str, members: &[String]) -> Result<(), String> {
-        let roster = self
-            .crypto
+    /// Credential identities currently in a conversation's MLS group.
+    pub fn group_members(&self, conversation_id: &str) -> Result<Vec<String>, String> {
+        self.crypto
             .group_members(conversation_id)
-            .map_err(|error| error.to_string())?;
-        let mut packages = Vec::new();
+            .map_err(|error| error.to_string())
+    }
+
+    /// Devices waiting for this user to approve them.
+    pub fn pending_devices(&self) -> Vec<(String, String)> {
+        self.store.lock().expect("store lock").pending()
+    }
+
+    /// Trust a device identity (`username#device-id`) so the next sync may
+    /// add it. Does not add it by itself.
+    pub fn trust_device(&self, identity: &str) -> Result<(), String> {
+        if thrum_core::mls::split_identity(identity).is_none() {
+            return Err(format!(
+                "{identity} is not a device identity (expected username#device-id)"
+            ));
+        }
+        self.store.lock().expect("store lock").trust(identity);
+        Ok(())
+    }
+
+    /// Bring one conversation's MLS group in line with the server.
+    ///
+    /// Accounts in `admit` have their current devices added without a prior
+    /// trust decision: the user just named them. Every other new device is
+    /// recorded as pending. Devices the server no longer lists, and devices
+    /// of accounts that left, are removed.
+    async fn sync_group(
+        &self,
+        conversation_id: &str,
+        members: &[String],
+        admit: &HashSet<String>,
+    ) -> Result<SyncReport, String> {
+        let roster = self.group_members(conversation_id)?;
+        let trusted = self.store.lock().expect("store lock").trusted();
+        let mut report = SyncReport::default();
+        let mut to_remove = departed_members(self.identity(), &roster, members);
+        let mut to_add: Vec<(String, String)> = Vec::new();
+        let mut pending = Vec::new();
+        let mut newly_trusted = Vec::new();
+        let mut newly_known = Vec::new();
         for member in members {
-            for device_id in self
+            let active = self
                 .client
-                .devices_with_key_packages(&self.session.token, member)
-                .await?
-            {
-                let identity = format!("{member}#{device_id}");
-                if roster.contains(&identity) || identity == self.identity() {
-                    continue;
+                .active_devices(&self.session.token, member)
+                .await?;
+            let admit_member = admit.iter().any(|name| name.eq_ignore_ascii_case(member));
+            let known = self
+                .store
+                .lock()
+                .expect("store lock")
+                .knows_account(conversation_id, member);
+            for action in plan_roster(
+                self.identity(),
+                &roster,
+                member,
+                &active,
+                &trusted,
+                admit_member,
+                known,
+            ) {
+                match action {
+                    RosterAction::Remove(identity) => to_remove.push(identity),
+                    RosterAction::Pending(identity) => pending.push(identity),
+                    RosterAction::Add(identity) => {
+                        let device_id = identity
+                            .split_once('#')
+                            .map(|(_, device_id)| device_id.to_string())
+                            .unwrap_or_default();
+                        newly_trusted.push(identity.clone());
+                        to_add.push((identity, device_id));
+                    }
                 }
-                if let Some(package) = self
-                    .client
-                    .fetch_key_package(&self.session.token, &device_id)
-                    .await?
-                {
-                    packages.push(checked_key_package(&self.crypto, &package, &identity)?);
+            }
+            let in_group = roster.iter().any(|identity| {
+                thrum_core::mls::split_identity(identity)
+                    .is_some_and(|(account, _)| account.eq_ignore_ascii_case(member))
+            });
+            if !active.is_empty() || in_group {
+                newly_known.push(member.clone());
+            }
+        }
+        {
+            let mut store = self.store.lock().expect("store lock");
+            for identity in &newly_trusted {
+                store.trust(identity);
+            }
+            for member in &newly_known {
+                store.mark_known(conversation_id, member);
+            }
+            store.set_pending(conversation_id, &pending);
+        }
+        for identity in pending {
+            report.push(conversation_id, "pending", &identity);
+        }
+        for identity in to_remove {
+            match self.remove_identity(conversation_id, &identity).await {
+                Ok(()) => report.push(conversation_id, "removed", &identity),
+                Err(error) => {
+                    // Another member may have removed it in the same moment.
+                    eprintln!("note: could not remove {identity}: {error}");
                 }
             }
         }
-        if packages.is_empty() {
-            return Ok(());
+        let mut packages = Vec::new();
+        let mut added = Vec::new();
+        for (identity, device_id) in to_add {
+            let Some(package) = self
+                .client
+                .fetch_key_package(&self.session.token, &device_id)
+                .await?
+            else {
+                continue;
+            };
+            packages.push(checked_key_package(&self.crypto, &package, &identity)?);
+            added.push(identity);
         }
-        let (commit, welcome) = self
-            .crypto
-            .add_members(conversation_id, &packages)
-            .map_err(|error| error.to_string())?;
-        self.persist()?;
-        if let Some(welcome) = welcome {
-            let payload = encode_envelope(&Envelope::welcome(&welcome));
+        if !packages.is_empty() {
+            let (commit, welcome) = self
+                .crypto
+                .add_members(conversation_id, &packages)
+                .map_err(|error| error.to_string())?;
+            self.persist()?;
+            if let Some(welcome) = welcome {
+                let payload = encode_envelope(&Envelope::welcome(&welcome));
+                self.client
+                    .send_message(&self.session.token, conversation_id, &payload)
+                    .await?;
+            }
+            let payload = encode_envelope(&Envelope::mls(&commit));
             self.client
                 .send_message(&self.session.token, conversation_id, &payload)
                 .await?;
+            for identity in added {
+                report.push(conversation_id, "added", &identity);
+            }
         }
+        Ok(report)
+    }
+
+    /// Remove one device identity and send the commit. The group is merged
+    /// locally before the function returns.
+    async fn remove_identity(&self, conversation_id: &str, identity: &str) -> Result<(), String> {
+        let commit = self
+            .crypto
+            .remove_member(conversation_id, identity)
+            .map_err(|error| error.to_string())?;
+        self.persist()?;
         let payload = encode_envelope(&Envelope::mls(&commit));
         self.client
             .send_message(&self.session.token, conversation_id, &payload)
@@ -279,10 +432,13 @@ impl Chat {
         Ok(())
     }
 
-    /// Bring every conversation in line with the server: add missing devices
-    /// of all members, and top up this device's key package stock.
-    pub async fn sync(&self) -> Result<(), String> {
+    /// Bring every conversation in line with the server and top up this
+    /// device's key package stock. New device identities are not added
+    /// unless this user has trusted them (or just added that account).
+    pub async fn sync(&self) -> Result<SyncReport, String> {
         self.top_up_key_packages().await?;
+        let mut report = SyncReport::default();
+        let empty = HashSet::new();
         for (conversation_id, members) in
             self.client.list_conversations(&self.session.token).await?
         {
@@ -291,10 +447,13 @@ impl Chat {
                 .has_group(&conversation_id)
                 .map_err(|error| error.to_string())?
             {
-                self.sync_group(&conversation_id, &members).await?;
+                let part = self.sync_group(&conversation_id, &members, &empty).await?;
+                report.added.extend(part.added);
+                report.removed.extend(part.removed);
+                report.pending.extend(part.pending);
             }
         }
-        Ok(())
+        Ok(report)
     }
 
     /// Process everything queued for this device before doing something
@@ -589,20 +748,34 @@ impl Chat {
                     None
                 }
             },
-            Envelope::Mls { .. } => match self.crypto.process_incoming(conversation_id, &data) {
-                Ok(Incoming::Application { payload, .. }) => {
-                    self.apply_app_message(conversation_id, message_id, sender_username, &payload)
+            Envelope::Mls { .. } => {
+                let before = self
+                    .crypto
+                    .group_members(conversation_id)
+                    .unwrap_or_default();
+                match self.crypto.process_incoming(conversation_id, &data) {
+                    Ok(Incoming::Application { payload, .. }) => self.apply_app_message(
+                        conversation_id,
+                        message_id,
+                        sender_username,
+                        &payload,
+                    ),
+                    Ok(Incoming::Commit) => {
+                        let after = self
+                            .crypto
+                            .group_members(conversation_id)
+                            .unwrap_or_default();
+                        self.persist().ok()?;
+                        let note = roster_note(&before, &after);
+                        if note.is_empty() { None } else { Some(note) }
+                    }
+                    Ok(Incoming::Ignored) => None,
+                    Err(error) => {
+                        eprintln!("message not applied: {error}"); // not for this device
+                        None
+                    }
                 }
-                Ok(Incoming::Commit) => {
-                    self.persist().ok()?;
-                    None
-                }
-                Ok(Incoming::Ignored) => None,
-                Err(error) => {
-                    eprintln!("message not applied: {error}"); // not for this device
-                    None
-                }
-            },
+            }
         }
     }
 
@@ -688,6 +861,22 @@ impl Chat {
             }
         }
     }
+}
+
+/// A one-line description of who joined or left in a commit.
+fn roster_note(before: &[String], after: &[String]) -> String {
+    let mut parts = Vec::new();
+    for identity in after {
+        if !before.iter().any(|member| member == identity) {
+            parts.push(format!("{identity} joined"));
+        }
+    }
+    for identity in before {
+        if !after.iter().any(|member| member == identity) {
+            parts.push(format!("{identity} left"));
+        }
+    }
+    parts.join(", ")
 }
 
 /// The MLS state directory for a state file: `<state-file>.mls/`.

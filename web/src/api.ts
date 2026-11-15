@@ -103,20 +103,34 @@ export class Api {
     await this.expectOk(await this.call("DELETE", `/v1/devices/${encodeURIComponent(deviceId)}`));
   }
 
-  async uploadKeyPackage(bytes: Uint8Array): Promise<void> {
+  async uploadKeyPackage(bytes: Uint8Array, lastResort = false): Promise<void> {
+    const headers: Record<string, string> = { "content-type": "application/octet-stream" };
+    if (lastResort) headers["x-thrum-key-package-role"] = "last-resort";
     await this.expectOk(
       await this.call("POST", "/v1/key-packages", {
         body: bytes as unknown as BodyInit,
-        headers: { "content-type": "application/octet-stream" },
+        headers,
       }),
     );
   }
 
-  async keyPackageCount(): Promise<number> {
-    const body = await this.expectJson<{ count: number }>(
+  async keyPackageStock(): Promise<{ count: number; lastResort: boolean }> {
+    const body = await this.expectJson<{ count: number; last_resort?: boolean }>(
       await this.call("GET", "/v1/key-packages/count"),
     );
-    return body.count;
+    return { count: body.count, lastResort: body.last_resort === true };
+  }
+
+  async activeDevices(username: string): Promise<string[]> {
+    const body = await this.expectJson<{ devices: string[] }>(
+      await this.call("GET", `/v1/users/${encodeURIComponent(username)}/devices`),
+    );
+    return body.devices ?? [];
+  }
+
+  async serverInfo(): Promise<{ sourceUrl: string }> {
+    const body = await this.expectJson<{ source_url?: string }>(await this.call("GET", "/v1/meta"));
+    return { sourceUrl: body.source_url ?? "" };
   }
 
   async devicesWithKeyPackages(username: string): Promise<string[]> {

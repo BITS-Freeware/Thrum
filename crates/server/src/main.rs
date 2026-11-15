@@ -24,8 +24,19 @@ async fn main() {
         Ok(value) => value
             .parse()
             .unwrap_or_else(|error| panic!("bad THRUM_BIND {value:?}: {error}")),
-        Err(_) => IpAddr::from([0, 0, 0, 0]),
+        // Loopback unless the operator opts in. The container image sets
+        // THRUM_BIND=0.0.0.0 because the process has to accept the proxy's
+        // connection from outside the network namespace.
+        Err(_) => IpAddr::from([127, 0, 0, 1]),
     };
+    if !bind.is_loopback() {
+        eprintln!(
+            "warning: thrum-server is bound to {bind}, which is not a loopback address. \
+             Passwords and session tokens travel in the clear unless a TLS reverse proxy \
+             terminates HTTPS in front of this process. Do not publish port {port} on a \
+             public interface."
+        );
+    }
     let addr = SocketAddr::new(bind, port);
     let listener = TcpListener::bind(addr)
         .await
@@ -50,7 +61,8 @@ async fn main() {
     println!("thrum-server listening on {addr}");
     axum::serve(
         listener,
-        router.into_make_service_with_connect_info::<SocketAddr>(),
+        thrum_server::with_security_headers(router)
+            .into_make_service_with_connect_info::<SocketAddr>(),
     )
     .await
     .unwrap_or_else(|error| panic!("server error: {error}"));

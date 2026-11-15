@@ -1,9 +1,8 @@
 # Threat Model
 
-What we protect, who we protect it from, and what version 0.1.0 actually
+What we protect, who we protect it from, and what version 0.2.0 actually
 defends. Every adversary item ends in one of three ways: a test, a documented
-mitigation, or a documented limitation. M7 re-checks every line against the
-shipped code.
+mitigation, or a documented limitation.
 
 ## Assets
 
@@ -34,6 +33,18 @@ Runs the server and reads everything it stores and relays.
   only enter a fetched package into a commit when its credential identity
   is the device that was asked for. *(mitigation: enforced in the add flow
   of both clients, M3; the check is unit-tested against a swapped package.)*
+  Fetching a package requires a logged-in caller, is rate-limited per caller
+  and per target device, and cannot drain the directory dry: one-time stock
+  is capped and one last-resort package remains. *(mitigation: decision 0013;
+  tested in the key-package route tests.)*
+- Cannot silently add a device that appears after a client has already seen
+  that account in the conversation. Trust on first use applies to the devices
+  present the first time the account appears: the user named them, or they
+  redeemed an invite. A later device stays pending until the user trusts it,
+  on both clients. A malicious server can still substitute a device at that
+  first sight, including by inserting an account the user has not seen yet.
+  *(mitigation: decision 0013; tested by the CLI device-security test. Key
+  transparency remains out of scope.)*
 - Can try to guess passwords offline after a database leak: passwords are
   stored as Argon2id PHC strings with per-user salts, and unknown-name
   logins burn time on a dummy hash. *(mitigation: M1; hash format, verify
@@ -56,6 +67,11 @@ On the path between client and server.
   M7, decision 0011.)*
 - Cannot break end-to-end encryption without breaking TLS *and* the server's
   MLS group keys, which the server does not hold.
+- Registration and login limits follow the real client address only when the
+  immediate peer is listed in `THRUM_TRUSTED_PROXIES`; otherwise
+  `X-Forwarded-For` and `Forwarded` are ignored. Login also has a separate
+  per-account limit and an exponential backoff after repeated failures.
+  *(mitigation: tested in the rate-limit suite.)*
 
 ### 3. Stolen device
 
@@ -64,10 +80,12 @@ Has the device's local storage, not the server.
 - Sees whatever keys and message state the client keeps locally. 0.1.0 keeps
   client state on disk with standard file permissions and no extra at-rest
   encryption. *(documented limitation.)*
-- Can be cut off from the future: the user (or any other device of theirs)
-  revokes the device, it is removed from the MLS groups it belonged to, and
-  later epochs are unreadable to it. *(mitigation: device revocation, M1 and
-  M3; tested there.)*
+- Can be cut off from the future: revoking the device kills its session, and
+  the next sync by a remaining member removes its MLS leaf, so a message sent
+  after that removal is unreadable to the revoked device. The server itself
+  cannot remove the leaf. *(mitigation: decision 0013; tested by the CLI
+  device-security test, which loads the revoked device's keys and checks that
+  a later ciphertext is not an application message.)*
 - Sessions are bearer tokens; revoking a device revokes its token.
   *(mitigation: M1.)*
 
@@ -90,7 +108,7 @@ A legitimate member who misbehaves.
   panic guard and fuzz layer, and a failed parse leaves the device's
   group state untouched. *(mitigation: decision 0011; tested there.)*
 
-## Out of scope in 0.1.0
+## Out of scope in 0.2.0
 
 - Anonymity from the server operator, or hiding who talks to whom.
 - Spam resistance beyond rate limiting of registration and login.
