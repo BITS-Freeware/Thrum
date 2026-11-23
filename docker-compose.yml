@@ -30,13 +30,19 @@ services:
       interval: 30s
       timeout: 5s
       start_period: 10s
+    # With the postgres profile, start once PostgreSQL accepts connections.
+    # Without it the dependency is skipped.
+    depends_on:
+      postgres:
+        condition: service_healthy
+        required: false
     restart: unless-stopped
 
   # Optional: `docker compose --profile postgres up -d` switches the
   # server to PostgreSQL. The database lives in a named volume; the
   # credentials below are for the private compose network only.
   postgres:
-    image: postgres:17
+    image: postgres:17@sha256:223efeb196329b55b3b9a13db144956411dbc18e727e59f681c3e0aede6475cf
     profiles: ["postgres"]
     environment:
       POSTGRES_USER: thrum
@@ -44,6 +50,11 @@ services:
       POSTGRES_DB: thrum
     volumes:
       - thrum-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "thrum", "-d", "thrum"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
     restart: unless-stopped
 
 volumes:

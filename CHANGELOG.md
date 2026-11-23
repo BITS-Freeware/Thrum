@@ -30,8 +30,21 @@ All notable changes to Thrum are documented here. The format follows
   note instead of the full warning, which now appears only when an
   operator chose a non-loopback address.
 
+- The image's base images are pinned by digest, and every cargo step in
+  the image and in `scripts/build-wasm.sh` uses `--locked`, so a rebuild
+  compiles the same code into the web client's JavaScript and wasm.
+  Dependabot proposes digest updates, and CI records the SHA-256 of the
+  wasm glue and the built web client for every commit and release tag.
+
 ### Fixed
 
+- The server no longer prints the database password. The URL it logs has
+  the password replaced, and a PostgreSQL server that does not answer yet
+  is retried for `THRUM_DB_CONNECT_WAIT_SECONDS` (default 30) before
+  startup ends with an error instead of a panic. With the Compose
+  `postgres` profile the server waits for PostgreSQL's health check.
+- Blob ids no longer appear in server logs; log lines name a blob by a
+  short hash of its id.
 - The server stops cleanly on SIGTERM or Ctrl-C: it finishes open
   requests, closes the database and writes the SQLite write-ahead log back
   into the database file, so a copy of `thrum.sqlite` after a stop holds
