@@ -55,6 +55,10 @@ All notable changes to Thrum are documented here. The format follows
   logs do not record it. The old `DELETE .../invites/{token}` is gone.
 - A signed-out or revoked device's row no longer keeps the hash of its
   old token (migration 0011 clears existing ones).
+- `thrum-server healthcheck` dials the address in `THRUM_BIND` (loopback
+  for a wildcard bind), so a server bound to one specific address is no
+  longer reported unhealthy. The Compose file gives the read-only
+  container a small `/tmp` for SQLite's temporary files.
 - The dummy password hash for unknown names is computed off the async
   workers, like every other Argon2 run.
 - The threat model and the self-hosting guide say that the web client

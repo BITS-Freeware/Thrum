@@ -136,10 +136,18 @@ async fn healthcheck() -> i32 {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(8080);
+    // Dial the address the server binds; a wildcard bind answers on
+    // loopback.
+    let host: std::net::IpAddr = match std::env::var("THRUM_BIND")
+        .ok()
+        .and_then(|value| value.parse::<std::net::IpAddr>().ok())
+    {
+        Some(ip) if ip.is_unspecified() && ip.is_ipv6() => std::net::Ipv6Addr::LOCALHOST.into(),
+        Some(ip) if !ip.is_unspecified() => ip,
+        _ => std::net::Ipv4Addr::LOCALHOST.into(),
+    };
     let check = async {
-        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
-            .await
-            .ok()?;
+        let mut stream = tokio::net::TcpStream::connect((host, port)).await.ok()?;
         stream
             .write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
             .await
