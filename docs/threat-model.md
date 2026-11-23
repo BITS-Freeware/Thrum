@@ -1,6 +1,6 @@
 # Threat Model
 
-What we protect, who we protect it from, and what version 0.2.0 actually
+What we protect, who we protect it from, and what version 0.2.1 actually
 defends. Every adversary item ends in one of three ways: a test, a documented
 mitigation, or a documented limitation.
 
@@ -34,17 +34,24 @@ Runs the server and reads everything it stores and relays.
   is the device that was asked for. *(mitigation: enforced in the add flow
   of both clients, M3; the check is unit-tested against a swapped package.)*
   Fetching a package requires a logged-in caller, is rate-limited per caller
-  and per target device, and cannot drain the directory dry: one-time stock
-  is capped and one last-resort package remains. *(mitigation: decision 0013;
-  tested in the key-package route tests.)*
+  and per caller and target device, and cannot drain the directory dry:
+  one-time stock is capped, one last-resort package remains, and past a
+  device's overall ceiling fetches get the last-resort package.
+  *(mitigation: decisions 0013 and 0017; tested in the key-package and
+  resource-limit suites.)*
 - Cannot silently add a device that appears after a client has already seen
-  that account in the conversation. Trust on first use applies to the devices
-  present the first time the account appears: the user named them, or they
-  redeemed an invite. A later device stays pending until the user trusts it,
-  on both clients. A malicious server can still substitute a device at that
+  that account in any conversation. Trust on first use applies to the
+  devices present the first time the account appears: the user named them,
+  or they redeemed an invite. A later device stays pending until the user
+  trusts it, on both clients. Clients pin each device's signature key when
+  they first see it, so a known device offered under another key, in a new
+  conversation or after it was revoked and listed again, also waits for the
+  user. A malicious server can still substitute a device at an account's
   first sight, including by inserting an account the user has not seen yet.
-  *(mitigation: decision 0013; tested by the CLI device-security test. Key
-  transparency remains out of scope.)*
+  *(mitigation: decisions 0013 and 0015; tested by the CLI device-security
+  tests. Key transparency remains out of scope.)*
+- Cannot hand a deleted account's name to someone else: deleted names are
+  retired. *(mitigation: decision 0015; tested in the account tests.)*
 - Can try to guess passwords offline after a database leak: passwords are
   stored as Argon2id PHC strings with per-user salts, and unknown-name
   logins burn time on a dummy hash. *(mitigation: M1; hash format, verify
@@ -69,17 +76,33 @@ On the path between client and server.
   MLS group keys, which the server does not hold.
 - Registration and login limits follow the real client address only when the
   immediate peer is listed in `THRUM_TRUSTED_PROXIES`; otherwise
-  `X-Forwarded-For` and `Forwarded` are ignored. Login also has a separate
-  per-account limit and an exponential backoff after repeated failures.
-  *(mitigation: tested in the rate-limit suite.)*
+  `X-Forwarded-For` and `Forwarded` are ignored. IPv6 addresses are limited
+  per /64. Login also has a per-account limit and an exponential backoff
+  after repeated failures, both kept per client address, so a stranger's
+  guesses lock out the stranger rather than the owner. An hourly ceiling on
+  failures per account, from any address, bounds guessing spread over many
+  addresses; reaching it does refuse the owner too, for the rest of that
+  hour. Wrong passwords on account deletion count toward the same limits,
+  and login bodies are capped at 16 KiB, so failed logins cannot grow
+  server memory. *(mitigation: tested in the rate-limit suite.)*
+- A logged-in user's load on the server is bounded by operator settings:
+  members per conversation on every path that adds one, sends per device
+  per minute, queued bytes per account, signed-in devices per account,
+  uploaded bytes per day, and key-package stock per device. Each check
+  holds when requests overlap. Catch-up and export read stored messages a
+  page at a time. *(mitigation: decision 0017; tested in the
+  resource-limit suite on both databases.)*
 
 ### 3. Stolen device
 
 Has the device's local storage, not the server.
 
-- Sees whatever keys and message state the client keeps locally. 0.1.0 keeps
-  client state on disk with standard file permissions and no extra at-rest
-  encryption. *(documented limitation.)*
+- Sees whatever keys and message state the client keeps locally. The CLI
+  writes its session, keys, history, attachments and exports readable by
+  the owner only, so other accounts on a shared machine cannot read them,
+  and deleting the account removes them; there is no extra at-rest
+  encryption. *(mitigation for other local accounts: tested in the CLI
+  file-mode test; at-rest encryption is a documented limitation.)*
 - Can be cut off from the future: revoking the device kills its session, and
   the next sync by a remaining member removes its MLS leaf, so a message sent
   after that removal is unreadable to the revoked device. The server itself
@@ -99,16 +122,30 @@ A legitimate member who misbehaves.
   later epochs are encrypted to the remaining members only. *(mitigation: MLS
   removal; tested in M3.)*
 - Cannot forge messages from another member: MLS authenticates each
-  application message to its sender's leaf. *(mitigation: MLS guarantees;
-  exercised by M3 tests.)*
+  application message to its sender's leaf, and clients show the sender from
+  that leaf's credential, not from the relay's label. A message from a leaf
+  that has since been removed is ignored. *(mitigation: MLS guarantees and
+  decision 0014; tested in the core and CLI membership tests.)*
+- Cannot change who is in a group beyond what the server lists: clients merge
+  a commit, or join from a welcome, only when every leaf it adds, keeps or
+  names is a device the server lists for a member account, with the
+  signature key the server bound to it, and a welcome only for the
+  conversation it arrived in. A refused commit or welcome leaves the device
+  unchanged. *(mitigation: decision 0014; tested in the core and CLI
+  membership tests.)*
 - Cannot read messages sent before they were added: earlier epochs do not
   include them. *(mitigation: MLS epoch structure; tested in M3.)*
 - Cannot crash other members by feeding them malformed MLS material
   (commits, welcomes, key packages): all of it is parsed behind the M7
   panic guard and fuzz layer, and a failed parse leaves the device's
   group state untouched. *(mitigation: decision 0011; tested there.)*
+- Cannot control another member's terminal or requests through what they
+  write: the CLI escapes control characters and direction overrides in
+  everything it prints, ignores attachments whose blob id is malformed,
+  and puts every id into a request path as one encoded segment.
+  *(mitigation: tested in the CLI peer-text tests.)*
 
-## Out of scope in 0.2.0
+## Out of scope in 0.2.1
 
 - Anonymity from the server operator, or hiding who talks to whom.
 - Spam resistance beyond rate limiting of registration and login.

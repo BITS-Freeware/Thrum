@@ -1,6 +1,39 @@
 #![allow(dead_code)] // shared helpers; each test binary uses a subset
 
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex};
+
 use serde_json::Value;
+use thrum_core::mls::DeviceCrypto;
+
+/// MLS keys per device id, so that every package a test uploads for one
+/// device carries the same signature key, as a real client's do.
+static DEVICE_KEYS: LazyLock<Mutex<HashMap<String, Arc<DeviceCrypto>>>> =
+    LazyLock::new(Default::default);
+
+/// The MLS keys of the device a login session belongs to.
+pub fn device_keys(session: &Value) -> Arc<DeviceCrypto> {
+    let username = session["username"].as_str().expect("session username");
+    let device_id = session["device_id"].as_str().expect("session device id");
+    DEVICE_KEYS
+        .lock()
+        .unwrap()
+        .entry(device_id.to_string())
+        .or_insert_with(|| Arc::new(DeviceCrypto::generate(format!("{username}#{device_id}"))))
+        .clone()
+}
+
+/// A valid one-time key package for the session's device.
+pub fn key_package(session: &Value) -> Vec<u8> {
+    device_keys(session).new_key_package().expect("key package")
+}
+
+/// A valid last-resort key package for the session's device.
+pub fn last_resort_package(session: &Value) -> Vec<u8> {
+    device_keys(session)
+        .new_last_resort_key_package()
+        .expect("last-resort key package")
+}
 
 /// A running server on a random loopback port with its own database.
 pub struct TestApp {

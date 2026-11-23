@@ -17,7 +17,9 @@ use serde_json::json;
 
 use crate::auth;
 use crate::error::ApiError;
-use crate::routes::conversations::{blocked_between, conversation_info, require_admin};
+use crate::routes::conversations::{
+    blocked_among, conversation_info, group_too_large, lock_conversation, member_ids, require_admin,
+};
 use crate::state::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -117,7 +119,9 @@ pub async fn revoke(
 }
 
 /// `POST /v1/invites/redeem`: join the conversation the token points to.
-/// The caller must not be blocked by the invite's creator (or block them).
+/// The caller must not block, or be blocked by, anyone in the group, must
+/// not be someone the admin removed from it, and the group must have room.
+/// A member redeeming again changes nothing and spends no use.
 pub async fn redeem(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -137,32 +141,62 @@ pub async fn redeem(
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(ApiError::not_found)?;
-    let (conversation_id, created_by) = row;
-    blocked_between(&state, authed.user_id, created_by).await?;
-    let consumed = sqlx::query(
-        "UPDATE invites SET use_count = use_count + 1
-         WHERE token_hash = $1 AND revoked_at IS NULL
-           AND (expires_at IS NULL OR expires_at > $2)
-           AND (max_uses IS NULL OR use_count < max_uses)",
-    )
-    .bind(&token_hash)
-    .bind(now)
-    .execute(&state.db)
-    .await?
-    .rows_affected();
-    if consumed == 0 {
-        return Err(ApiError::not_found());
+    let (conversation_id, _created_by) = row;
+    let current = member_ids(&state, &conversation_id).await?;
+    if !current.contains(&authed.user_id) {
+        blocked_among(&state, &[authed.user_id], &current).await?;
     }
 
-    sqlx::query(
-        "INSERT INTO conversation_members (conversation_id, user_id, joined_at)
-         VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
-    )
-    .bind(&conversation_id)
-    .bind(authed.user_id)
-    .bind(crate::accounts::now())
-    .execute(&state.db)
-    .await?;
+    // Check, spend a use and insert under the conversation's lock, so
+    // overlapping joins cannot pass the member cap together.
+    let mut tx = state.db.begin().await?;
+    if !lock_conversation(&mut tx, &conversation_id).await? {
+        return Err(ApiError::not_found());
+    }
+    let current: Vec<i64> =
+        sqlx::query_scalar("SELECT user_id FROM conversation_members WHERE conversation_id = $1")
+            .bind(&conversation_id)
+            .fetch_all(&mut *tx)
+            .await?;
+    if !current.contains(&authed.user_id) {
+        let removed = sqlx::query_as::<_, (i64,)>(
+            "SELECT 1 FROM conversation_removals WHERE conversation_id = $1 AND user_id = $2",
+        )
+        .bind(&conversation_id)
+        .bind(authed.user_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if removed.is_some() {
+            return Err(ApiError::forbidden("removed"));
+        }
+        if group_too_large(state.cfg.max_group_members, current.len() + 1) {
+            return Err(ApiError::bad_request("group_too_large"));
+        }
+        let consumed = sqlx::query(
+            "UPDATE invites SET use_count = use_count + 1
+             WHERE token_hash = $1 AND revoked_at IS NULL
+               AND (expires_at IS NULL OR expires_at > $2)
+               AND (max_uses IS NULL OR use_count < max_uses)",
+        )
+        .bind(&token_hash)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if consumed == 0 {
+            return Err(ApiError::not_found());
+        }
+        sqlx::query(
+            "INSERT INTO conversation_members (conversation_id, user_id, joined_at)
+             VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+        )
+        .bind(&conversation_id)
+        .bind(authed.user_id)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
     Ok((
         StatusCode::OK,
         Json(conversation_info(&state, &conversation_id).await?),

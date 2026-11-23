@@ -1,12 +1,11 @@
 //! Data export and account deletion.
 
-use argon2::password_hash::PasswordHash;
-use argon2::{Argon2, PasswordVerifier};
-use axum::Json;
+use axum::body::{Body, Bytes};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
+use futures_util::StreamExt;
 use serde_json::json;
 use sqlx::Row;
 
@@ -108,37 +107,6 @@ pub async fn export(
         }));
     }
 
-    // Messages in those conversations.
-    let mut messages = Vec::new();
-    for conv in &conv_rows {
-        let conv_id: String = conv.get("id");
-
-        let msg_rows = sqlx::query(
-            r#"
-            SELECT m.id, m.created_at, m.payload, u.username AS sender_name
-            FROM messages m
-            JOIN devices d ON d.id = m.sender_device
-            JOIN users u ON u.id = d.user_id
-            WHERE m.conversation_id = $1
-            ORDER BY m.created_at
-            "#,
-        )
-        .bind(&conv_id)
-        .fetch_all(db)
-        .await?;
-
-        for row in &msg_rows {
-            let payload_bytes: Vec<u8> = row.get("payload");
-            messages.push(json!({
-                "id": row.get::<String, _>("id"),
-                "conversation_id": conv_id.clone(),
-                "sender": row.get::<String, _>("sender_name"),
-                "created_at": row.get::<i64, _>("created_at"),
-                "payload": STANDARD.encode(payload_bytes),
-            }));
-        }
-    }
-
     // Blob records.
     let blob_rows = sqlx::query(
         r#"SELECT id, size, created_at, expires_at FROM blobs WHERE uploader_id = $1 ORDER BY created_at"#,
@@ -165,9 +133,49 @@ pub async fn export(
         "account": account,
         "devices": devices,
         "conversations": conversations,
-        "messages": messages,
         "blobs": blobs,
     });
+    // The messages go last, one page at a time, so a long history is never
+    // held in memory at once.
+    let mut head = serde_json::to_string(&document).map_err(|_| ApiError::internal())?;
+    head.pop(); // the closing brace
+    head.push_str(",\"messages\":[");
+    let pages = futures_util::stream::unfold(
+        Some(ExportCursor {
+            state,
+            user_id,
+            after: None,
+            first: true,
+        }),
+        |cursor| async move {
+            let mut cursor = cursor?;
+            match export_page(&cursor.state, cursor.user_id, cursor.after).await {
+                Err(error) => {
+                    eprintln!("export page failed: {error}");
+                    Some((Err(std::io::Error::other("export failed")), None))
+                }
+                Ok((page, next)) => {
+                    let last = (page.len() as i64) < EXPORT_PAGE;
+                    let mut chunk = String::new();
+                    for message in page {
+                        if !cursor.first {
+                            chunk.push(',');
+                        }
+                        cursor.first = false;
+                        chunk.push_str(&message.to_string());
+                    }
+                    if last {
+                        chunk.push_str("]}");
+                        Some((Ok(Bytes::from(chunk)), None))
+                    } else {
+                        cursor.after = next;
+                        Some((Ok(Bytes::from(chunk)), Some(cursor)))
+                    }
+                }
+            }
+        },
+    );
+    let body = futures_util::stream::once(async move { Ok(Bytes::from(head)) }).chain(pages);
 
     Ok((
         StatusCode::OK,
@@ -178,8 +186,80 @@ pub async fn export(
                 "attachment; filename=\"thrum-export.json\"",
             ),
         ],
-        Json(document),
+        Body::from_stream(body),
     ))
+}
+
+/// Messages an export loads at once.
+const EXPORT_PAGE: i64 = 100;
+
+/// Where the export of one caller's messages has got to.
+struct ExportCursor {
+    state: AppState,
+    user_id: i64,
+    after: Option<(i64, i64)>,
+    first: bool,
+}
+
+/// One page of the messages in the caller's conversations that the caller
+/// sent or was sent (not what others were sent before the caller joined),
+/// oldest first, after `after`.
+async fn export_page(
+    state: &AppState,
+    user_id: i64,
+    after: Option<(i64, i64)>,
+) -> Result<(Vec<serde_json::Value>, Option<(i64, i64)>), sqlx::Error> {
+    let tiebreak = match state.backend {
+        crate::db::Backend::Sqlite => "m.rowid",
+        crate::db::Backend::Postgres => "m.seq",
+    };
+    let (after_time, after_order) = after.unwrap_or((i64::MIN, i64::MIN));
+    let rows = sqlx::query(&format!(
+        r#"
+        SELECT m.id, m.conversation_id, m.created_at, m.payload,
+               COALESCE(m.sender_name, u.username) AS sender_name,
+               CAST({tiebreak} AS BIGINT) AS ord
+        FROM messages m
+        JOIN conversation_members cm
+          ON cm.conversation_id = m.conversation_id AND cm.user_id = $1
+        JOIN devices d ON d.id = m.sender_device
+        JOIN users u ON u.id = d.user_id
+        WHERE (
+              d.user_id = $1
+              OR EXISTS (
+                  SELECT 1 FROM deliveries dl
+                  JOIN devices mine ON mine.id = dl.device_id
+                  WHERE dl.message_id = m.id AND mine.user_id = $1
+              )
+          )
+          AND (m.created_at > $2 OR (m.created_at = $2 AND {tiebreak} > $3))
+        ORDER BY m.created_at, {tiebreak}
+        LIMIT $4
+        "#
+    ))
+    .bind(user_id)
+    .bind(after_time)
+    .bind(after_order)
+    .bind(EXPORT_PAGE)
+    .fetch_all(&state.db)
+    .await?;
+    let next = rows
+        .last()
+        .map(|row| (row.get::<i64, _>("created_at"), row.get::<i64, _>("ord")));
+    let page = rows
+        .iter()
+        .map(|row| {
+            let payload: Vec<u8> = row.get("payload");
+            json!({
+                "id": row.get::<String, _>("id"),
+                "conversation_id": row.get::<String, _>("conversation_id"),
+                "sender": row.get::<String, _>("sender_name"),
+                "created_at": row.get::<i64, _>("created_at"),
+                "payload": STANDARD.encode(payload),
+            })
+        })
+        .collect();
+    Ok((page, next))
 }
 
 /// `DELETE /v1/account`: password-confirmed account deletion.
@@ -199,10 +279,7 @@ pub async fn delete_account(
         .fetch_one(&state.db)
         .await?;
     let stored: String = user_row.get("password_hash");
-    let parsed = PasswordHash::new(&stored).map_err(|_| ApiError::internal())?;
-    Argon2::default()
-        .verify_password(body.password.as_bytes(), &parsed)
-        .map_err(|_| ApiError::unauthorized("invalid_credentials"))?;
+    accounts::check_password(&body.password, &stored).await?;
 
     let db = &state.db;
 
@@ -225,7 +302,26 @@ pub async fn delete_account(
         .execute(db)
         .await?;
 
-    // 3. Messages sent by the user's devices (cascades deliveries).
+    // 3. Messages sent by the user's devices. Those some member has not
+    //    received yet may be commits that member needs, so they stay until
+    //    delivered or expired, moved to the placeholder sender with the
+    //    user's name kept for the frame. The rest go (cascades deliveries).
+    sqlx::query(
+        "UPDATE messages
+         SET sender_device = 'departed',
+             sender_name = (SELECT username FROM users WHERE id = $1)
+         WHERE sender_device IN (SELECT id FROM devices WHERE user_id = $1)
+           AND EXISTS (
+               SELECT 1 FROM deliveries d
+               JOIN devices r ON r.id = d.device_id
+               WHERE d.message_id = messages.id
+                 AND d.delivered_at IS NULL
+                 AND r.user_id <> $1
+           )",
+    )
+    .bind(user_id)
+    .execute(db)
+    .await?;
     sqlx::query(
         "DELETE FROM messages WHERE sender_device IN (SELECT id FROM devices WHERE user_id = $1)",
     )
@@ -233,7 +329,12 @@ pub async fn delete_account(
     .execute(db)
     .await?;
 
-    // 4. Devices (cascade key packages, deliveries).
+    // 4. Devices (cascade key packages, deliveries). Their open sockets
+    //    are closed once the rows are gone.
+    let device_ids: Vec<String> = sqlx::query_scalar("SELECT id FROM devices WHERE user_id = $1")
+        .bind(user_id)
+        .fetch_all(db)
+        .await?;
     sqlx::query("DELETE FROM devices WHERE user_id = $1")
         .bind(user_id)
         .execute(db)
@@ -259,11 +360,23 @@ pub async fn delete_account(
     .execute(db)
     .await?;
 
-    // 6. Delete the user row (cascade memberships, blocks).
+    // 6. Retire the name, so nobody can register it and inherit the trust
+    //    others placed in it, then delete the user row (cascade
+    //    memberships, blocks).
+    sqlx::query(
+        "INSERT INTO retired_usernames (username, retired_at) \
+         SELECT username, $2 FROM users WHERE id = $1 \
+         ON CONFLICT (username) DO NOTHING",
+    )
+    .bind(user_id)
+    .bind(accounts::now())
+    .execute(db)
+    .await?;
     sqlx::query("DELETE FROM users WHERE id = $1")
         .bind(user_id)
         .execute(db)
         .await?;
+    state.hub.disconnect(&device_ids);
 
     // 7. Delete memberless conversations (cascade messages, invites).
     sqlx::query(
@@ -278,6 +391,7 @@ pub async fn delete_account(
     Ok(StatusCode::NO_CONTENT)
 }
 
+use axum::Json;
 use axum::extract::State;
 
 #[derive(Debug, serde::Deserialize)]

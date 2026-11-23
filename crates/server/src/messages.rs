@@ -43,17 +43,50 @@ pub async fn create_conversation(
 /// Store an opaque message and fan delivery rows out to every live device
 /// of every member except the sending device.
 ///
+/// `queue_cap` bounds the bytes of the sending account's messages that
+/// some device has not received yet, this one included; zero means no cap.
+/// The check runs under a lock on the sender's account row, so parallel
+/// sends cannot pass it together.
+///
 /// Returns the message id and the device ids the message was queued for.
 pub async fn store_message(
     db: &AnyPool,
     conversation_id: &str,
-    sender_device: &str,
+    sender: (i64, &str),
     payload: &[u8],
+    queue_cap: u64,
 ) -> Result<(String, Vec<String>), ApiError> {
+    let (sender_user, sender_device) = sender;
     let message_id = Uuid::new_v4().to_string();
     let created_at = now();
     let internal = || ApiError::internal();
     let mut tx = db.begin().await.map_err(|_| internal())?;
+    if queue_cap > 0 {
+        sqlx::query("UPDATE users SET created_at = created_at WHERE id = $1")
+            .bind(sender_user)
+            .execute(&mut *tx)
+            .await
+            .map_err(|_| internal())?;
+        let queued: i64 = sqlx::query_scalar(
+            "SELECT CAST(COALESCE(SUM(LENGTH(m.payload)), 0) AS BIGINT)
+             FROM messages m JOIN devices d ON d.id = m.sender_device
+             WHERE d.user_id = $1
+               AND EXISTS (
+                   SELECT 1 FROM deliveries dl
+                   WHERE dl.message_id = m.id AND dl.delivered_at IS NULL
+               )",
+        )
+        .bind(sender_user)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|_| internal())?;
+        if (queued.max(0) as u64).saturating_add(payload.len() as u64) > queue_cap {
+            return Err(ApiError::new(
+                axum::http::StatusCode::TOO_MANY_REQUESTS,
+                "queue_full",
+            ));
+        }
+    }
     sqlx::query("INSERT INTO messages (id, conversation_id, sender_device, payload, created_at) VALUES ($1, $2, $3, $4, $5)")
         .bind(&message_id)
         .bind(conversation_id)
@@ -113,12 +146,21 @@ pub async fn cleanup_expired(db: &AnyPool, keep_older_than: i64) -> Result<(), s
     Ok(())
 }
 
-/// All undelivered messages for one device, oldest first, as frames.
-pub async fn undelivered_for_device(
+/// How many queued messages catch-up loads at once.
+pub const CATCH_UP_PAGE: i64 = 100;
+
+/// Where a catch-up page ended: the last message's creation time and
+/// insertion order. The next page starts after it.
+pub type QueueCursor = (i64, i64);
+
+/// One page of a device's undelivered messages, oldest first, after
+/// `after`, as frames, with the cursor of the page's last message.
+pub async fn undelivered_page(
     db: &AnyPool,
     backend: crate::db::Backend,
     device_id: &str,
-) -> Result<Vec<ServerFrame>, sqlx::Error> {
+    after: Option<QueueCursor>,
+) -> Result<(Vec<ServerFrame>, Option<QueueCursor>), sqlx::Error> {
     // Stable catch-up order: creation time, then insertion order. SQLite
     // exposes insertion order as rowid; PostgreSQL uses the messages.seq
     // identity column from its migration set.
@@ -126,22 +168,30 @@ pub async fn undelivered_for_device(
         crate::db::Backend::Sqlite => "m.rowid",
         crate::db::Backend::Postgres => "m.seq",
     };
-    let rows = sqlx::query_as::<_, (String, String, Vec<u8>, i64, String)>(&format!(
-        "SELECT m.id, m.conversation_id, m.payload, m.created_at, u.username
+    let (after_time, after_order) = after.unwrap_or((i64::MIN, i64::MIN));
+    let rows = sqlx::query_as::<_, (String, String, Vec<u8>, i64, String, i64)>(&format!(
+        "SELECT m.id, m.conversation_id, m.payload, m.created_at,
+                COALESCE(m.sender_name, u.username), CAST({tiebreak} AS BIGINT)
          FROM deliveries d
          JOIN messages m ON m.id = d.message_id
          JOIN devices sd ON sd.id = m.sender_device
          JOIN users u ON u.id = sd.user_id
          WHERE d.device_id = $1 AND d.delivered_at IS NULL
-         ORDER BY m.created_at, {tiebreak}"
+           AND (m.created_at > $2 OR (m.created_at = $2 AND {tiebreak} > $3))
+         ORDER BY m.created_at, {tiebreak}
+         LIMIT $4"
     ))
     .bind(device_id)
+    .bind(after_time)
+    .bind(after_order)
+    .bind(CATCH_UP_PAGE)
     .fetch_all(db)
     .await?;
-    Ok(rows
+    let cursor = rows.last().map(|row| (row.3, row.5));
+    let frames = rows
         .into_iter()
         .map(
-            |(message_id, conversation_id, payload, created_at, sender_username)| {
+            |(message_id, conversation_id, payload, created_at, sender_username, _)| {
                 ServerFrame::Message {
                     conversation_id,
                     message_id,
@@ -151,7 +201,8 @@ pub async fn undelivered_for_device(
                 }
             },
         )
-        .collect())
+        .collect();
+    Ok((frames, cursor))
 }
 
 /// Mark one delivery delivered; true when a pending row was updated.

@@ -30,7 +30,7 @@ pub struct RecvOptions {
 pub async fn recv(
     session: &Session,
     options: &RecvOptions,
-    mut interpret: impl FnMut(&str, &str, &str, &[u8]) -> Option<String>,
+    mut interpret: impl AsyncFnMut(&str, &str, &str, &[u8]) -> Option<String>,
     mut emit: impl FnMut(String),
 ) -> Result<(), String> {
     let url = ws_url(&session.server)?;
@@ -76,7 +76,9 @@ pub async fn recv(
                             &message_id,
                             &sender_username,
                             &payload_base64,
-                        ) {
+                        )
+                        .await
+                        {
                             emit(line);
                         }
                         send_frame(
@@ -103,15 +105,15 @@ pub async fn recv(
 }
 
 /// Decode and interpret one base64 payload.
-fn interpret_payload(
-    interpret: &mut impl FnMut(&str, &str, &str, &[u8]) -> Option<String>,
+async fn interpret_payload(
+    interpret: &mut impl AsyncFnMut(&str, &str, &str, &[u8]) -> Option<String>,
     conversation_id: &str,
     message_id: &str,
     sender_username: &str,
     payload_base64: &str,
 ) -> Option<String> {
     let payload = decode_payload(payload_base64)?;
-    interpret(conversation_id, message_id, sender_username, &payload)
+    interpret(conversation_id, message_id, sender_username, &payload).await
 }
 
 async fn send_frame(
@@ -160,18 +162,19 @@ mod tests {
         assert!(ws_url("ftp://example.com").is_err());
     }
 
-    #[test]
-    fn interpret_payload_decodes_base64() {
+    #[tokio::test]
+    async fn interpret_payload_decodes_base64() {
         let encoded = thrum_core::protocol::encode_payload(b"plain");
         let line = interpret_payload(
-            &mut |_conversation, _message_id, _sender, payload| {
+            &mut async |_conversation: &str, _message_id: &str, _sender: &str, payload: &[u8]| {
                 Some(String::from_utf8_lossy(payload).into_owned())
             },
             "conv",
             "m1",
             "alice",
             &encoded,
-        );
+        )
+        .await;
         assert_eq!(line, Some("plain".to_string()));
     }
 }

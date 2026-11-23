@@ -63,6 +63,14 @@ export class CryptoSession {
   readonly api: Api;
   private device: DeviceState | null = null;
   private session: Session | null = null;
+  /**
+   * Waits until incoming frames already received are applied; set by the
+   * live connection. Sending first could encrypt in an epoch a removal
+   * commit has already ended, which the removed device can still read.
+   */
+  beforeSend: (() => Promise<void>) | null = null;
+  /** Server roster JSON per conversation, for checking commits and welcomes. */
+  private rosters = new Map<string, string>();
   private keyPackageTarget = 2;
 
   private constructor(api: Api) {
@@ -201,16 +209,28 @@ export class CryptoSession {
     const roster = [...(this.device.group_members(conversationId) as unknown as string[])];
     const trusted = await loadTrusted();
     const known = await loadKnown(conversationId);
+    const knownAnywhere = await loadKnownAnywhere();
     const packages: Uint8Array[] = [];
     const added: string[] = [];
     const pending: string[] = [];
     const removals = [
       ...(departed_members(this.identity, roster, members) as unknown as string[]),
     ];
+    const accounts: Record<string, Record<string, string | null>> = {};
     for (const member of members) {
-      const active = await this.api.activeDevices(member);
+      accounts[member] = await this.api.activeDevicesWithKeys(member);
+    }
+    const changedKeys = await applyPins(accounts);
+    const serverRoster = JSON.stringify(accounts);
+    this.rosters.set(conversationId, serverRoster);
+    for (const member of members) {
+      const active = Object.keys(accounts[member] ?? {});
       const admitMember = [...admit].some((name) => name.toLowerCase() === member.toLowerCase());
-      const seen = [...known].some((name) => name.toLowerCase() === member.toLowerCase());
+      // Trust on first use is per account: a new conversation with an
+      // account this browser already knows does not admit new devices.
+      const seen = [...known, ...knownAnywhere].some(
+        (name) => name.toLowerCase() === member.toLowerCase(),
+      );
       const actions = plan_roster(
         this.identity,
         roster,
@@ -221,18 +241,32 @@ export class CryptoSession {
         seen,
       ) as unknown as { kind: string; identity: string }[];
       for (const action of actions) {
-        if (action.kind === "remove") removals.push(action.identity);
+        if (action.kind === "remove") {
+          // A device that left the server's list is no longer trusted: if
+          // it is listed again, it waits for the user.
+          trusted.delete(action.identity);
+          removals.push(action.identity);
+        }
         else if (action.kind === "pending") pending.push(action.identity);
         else if (action.kind === "add") {
+          if (changedKeys.has(action.identity)) {
+            // The key changed since this browser pinned it: like a new
+            // device, it waits for the user.
+            pending.push(action.identity);
+            continue;
+          }
           trusted.add(action.identity);
           const deviceId = action.identity.slice(action.identity.indexOf("#") + 1);
           const packageBytes = await this.api.fetchKeyPackage(deviceId);
           if (!packageBytes) continue;
-          const claimed = this.device.key_package_identity(packageBytes);
-          if (claimed !== action.identity) {
-            throw new Error(
-              `server returned a key package for ${claimed} instead of ${action.identity}`,
-            );
+          try {
+            this.device.check_key_package(packageBytes, action.identity, serverRoster);
+          } catch (error) {
+            // One bad package must not stop the rest of the sync, which
+            // may hold removals and other conversations.
+            console.warn("not adding", action.identity, error);
+            if ((await loadPins())[action.identity]) pending.push(action.identity);
+            continue;
           }
           packages.push(packageBytes);
           added.push(action.identity);
@@ -260,6 +294,7 @@ export class CryptoSession {
       welcome: Uint8Array | null;
     };
     await this.persist();
+    await this.pinGroupKeys(conversationId);
     if (result.welcome) {
       await this.api.sendMessage(conversationId, encodeEnvelope("welcome", result.welcome));
     }
@@ -290,6 +325,10 @@ export class CryptoSession {
     const trusted = await loadTrusted();
     trusted.add(identity);
     await saveTrusted(trusted);
+    // The user accepts whatever key the device presents next.
+    const pins = await loadPins();
+    delete pins[identity];
+    await savePins(pins);
     await this.sync();
   }
 
@@ -327,6 +366,7 @@ export class CryptoSession {
     if (!this.device.has_group(conversationId)) {
       throw new Error("this device has not joined this conversation's group yet");
     }
+    await this.beforeSend?.();
     const appBytes = encodeAppMessage(app);
     const wire = this.device.encrypt(conversationId, appBytes);
     await this.persist();
@@ -581,11 +621,51 @@ export class CryptoSession {
     return encodeClientFrame({ type: "auth", token: this.session.token });
   }
 
+  /** Pin the signature key of each current leaf that has none yet. */
+  private async pinGroupKeys(conversationId: string): Promise<void> {
+    if (!this.device) return;
+    const leaves = this.device.group_leaves(conversationId) as unknown as {
+      identity: string;
+      signatureKey: string;
+    }[];
+    const pins = await loadPins();
+    let added = false;
+    for (const leaf of leaves) {
+      if (!pins[leaf.identity]) {
+        pins[leaf.identity] = leaf.signatureKey;
+        added = true;
+      }
+    }
+    if (added) await savePins(pins);
+  }
+
+  /**
+   * The server's view of a conversation, as the wasm core's roster JSON:
+   * every member account with its active devices and their bound keys.
+   * Cached per conversation; `refresh` fetches it again.
+   */
+  private async serverRoster(conversationId: string, refresh: boolean): Promise<string> {
+    const cached = this.rosters.get(conversationId);
+    if (cached && !refresh) return cached;
+    const conversations = await this.api.listConversations();
+    const conversation = conversations.find((entry) => entry.id === conversationId);
+    const accounts: Record<string, Record<string, string | null>> = {};
+    for (const member of conversation?.members ?? []) {
+      accounts[member] = await this.api.activeDevicesWithKeys(member);
+    }
+    await applyPins(accounts);
+    const roster = JSON.stringify(accounts);
+    this.rosters.set(conversationId, roster);
+    return roster;
+  }
+
   /**
    * Turn one relay payload into store updates. Mirrors the CLI's
-   * `interpret`/`apply_app_message`. Returns whether the frame was fully
-   * applied and may be ack'd; false leaves it queued on the server for
-   * re-delivery after the next reconnect.
+   * `interpret`/`apply_app_message`. Returns whether the frame may be
+   * ack'd: it was applied, or it never can be (bad bytes, a refused
+   * commit), so offering it again would only replay it. False leaves it
+   * queued on the server for re-delivery after the next reconnect, which
+   * only helps a message that arrived before its group's welcome.
    */
   private async interpret(
     conversationId: string,
@@ -598,18 +678,26 @@ export class CryptoSession {
       | { kind: "mls" | "welcome"; data: Uint8Array }
       | null;
     if (!envelope) {
-      // Undecodable payload. Not acking keeps it on the server so a
-      // later connection can try again with fresher state.
-      console.warn("message", messageId, "has an undecodable envelope");
-      return false;
+      // Undecodable payload: no later state can read it, so drop it.
+      console.warn("message", messageId, "has an undecodable envelope; dropped");
+      return true;
     }
     if (envelope.kind === "welcome") {
-      try {
-        this.device.process_welcome(envelope.data);
-        await this.persist();
-      } catch (error) {
-        // Stale or foreign welcome; ignore like the CLI does.
-        console.warn("welcome rejected", error);
+      // A welcome only counts for the conversation it arrived in, and
+      // only when every member it names is on the server's roster with
+      // its bound key. A refusal leaves the device unchanged, so retry
+      // once with a fresh roster in case a member was just added.
+      for (const refresh of [false, true]) {
+        try {
+          const roster = await this.serverRoster(conversationId, refresh);
+          this.device.process_welcome(conversationId, envelope.data, roster);
+          await this.persist();
+          await this.pinGroupKeys(conversationId);
+          break;
+        } catch (error) {
+          // Stale or foreign welcome; ignore like the CLI does.
+          if (refresh) console.warn("welcome rejected", error);
+        }
       }
       await this.ensureConversationKnown(conversationId);
       this.notify();
@@ -623,28 +711,60 @@ export class CryptoSession {
       return false;
     }
     const before = [...(this.device.group_members(conversationId) as unknown as string[])];
-    let incoming: { kind: string; sender?: string; payload?: Uint8Array };
-    try {
-      incoming = (await this.device.process_incoming(
-        conversationId,
-        envelope.data,
-      )) as unknown as { kind: string; sender?: string; payload?: Uint8Array };
-    } catch (error) {
-      // The device has the group but could not apply this message;
-      // re-delivery after a reconnect may succeed with fresher state.
-      console.warn("message", messageId, "could not be applied", error);
-      return false;
+    type Processed = { kind: string; sender?: string; payload?: Uint8Array; reason?: string };
+    let incoming: Processed = { kind: "ignored" };
+    // Commits are checked against the server's roster; a refusal leaves
+    // the device unchanged, so retry once with a fresh roster in case the
+    // commit follows a membership change this device has not seen. A
+    // failed roster fetch throws, which leaves the frame queued.
+    for (const refresh of [false, true]) {
+      const roster = await this.serverRoster(conversationId, refresh);
+      try {
+        incoming = this.device.process_incoming(
+          conversationId,
+          envelope.data,
+          roster,
+        ) as unknown as Processed;
+      } catch (error) {
+        // The device has the group but cannot apply this message: bytes
+        // that are not MLS, or a message for an epoch it will never be in.
+        // Frames arrive in order, so a replay would fail the same way;
+        // drop it like the CLI does.
+        console.warn("message", messageId, "could not be applied; dropped", error);
+        return true;
+      }
+      if (incoming.kind !== "rejected") break;
+    }
+    if (incoming.kind === "rejected") {
+      console.warn("commit refused:", incoming.reason);
+      return true;
     }
     if (incoming.kind === "commit") {
       const after = [...(this.device.group_members(conversationId) as unknown as string[])];
       await this.persist();
+      await this.pinGroupKeys(conversationId);
       await this.noteRosterDiff(conversationId, before, after);
       this.notify();
       return true;
     }
-    if (incoming.kind !== "application" || !incoming.payload) return true;
-    const app = (await decodeAppMessage(incoming.payload)) as unknown as Record<string, unknown>;
-    await this.applyAppMessage(conversationId, messageId, incoming.sender ?? sender, app);
+    if (incoming.kind !== "application" || !incoming.payload || !incoming.sender) return true;
+    // The sender is the MLS credential that signed the message. The relay's
+    // label is only a hint; one that disagrees means the frame was tampered
+    // with, so it is dropped.
+    const hash = incoming.sender.indexOf("#");
+    const author = hash > 0 ? incoming.sender.slice(0, hash) : "";
+    if (!author || author.toLowerCase() !== sender.toLowerCase()) {
+      console.warn("dropped a message labeled", sender, "that", incoming.sender, "sent");
+      return true;
+    }
+    let app: Record<string, unknown>;
+    try {
+      app = (await decodeAppMessage(incoming.payload)) as unknown as Record<string, unknown>;
+    } catch (error) {
+      console.warn("message", messageId, "carries an unreadable app message; dropped", error);
+      return true;
+    }
+    await this.applyAppMessage(conversationId, messageId, author, app);
     await this.ensureConversationKnown(conversationId);
     this.notify();
     return true;
@@ -825,4 +945,56 @@ async function savePending(conversationId: string, identities: string[]): Promis
   if (identities.length === 0) delete pending[conversationId];
   else pending[conversationId] = identities;
   await saveMeta("pending-devices", JSON.stringify(pending));
+}
+
+/** Accounts this browser has introduced in any conversation. */
+async function loadKnownAnywhere(): Promise<Set<string>> {
+  const raw = await loadMeta("known-accounts");
+  if (!raw) return new Set();
+  try {
+    const parsed = JSON.parse(raw) as Record<string, string[]>;
+    return new Set(Object.values(parsed).flat());
+  } catch {
+    return new Set();
+  }
+}
+
+/** Device identity → the signature key (base64) first seen for it. */
+async function loadPins(): Promise<Record<string, string>> {
+  const raw = await loadMeta("pinned-keys");
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw) as Record<string, string>;
+  } catch {
+    return {};
+  }
+}
+
+async function savePins(pins: Record<string, string>): Promise<void> {
+  await saveMeta("pinned-keys", JSON.stringify(pins));
+}
+
+/**
+ * Hold every listed device in a roster to the key this browser pinned for
+ * it, whatever key the server reports. Returns the identities whose key
+ * the server now reports differently.
+ */
+async function applyPins(
+  accounts: Record<string, Record<string, string | null>>,
+): Promise<Set<string>> {
+  const pins = await loadPins();
+  const changed = new Set<string>();
+  for (const [username, devices] of Object.entries(accounts)) {
+    for (const [deviceId, reported] of Object.entries(devices)) {
+      const identity = `${username}#${deviceId}`;
+      const pinned = pins[identity];
+      if (!pinned) continue;
+      if (reported !== null && reported !== pinned) {
+        console.warn("the server reports a new signature key for", identity);
+        changed.add(identity);
+      }
+      devices[deviceId] = pinned;
+    }
+  }
+  return changed;
 }

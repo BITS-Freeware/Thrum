@@ -39,7 +39,8 @@ pub struct ConversationInfo {
 }
 
 /// `POST /v1/conversations`: create a conversation with the caller as its
-/// admin and the listed members. Blocked relationships refuse the creation.
+/// admin and the listed members. A block between any two of them refuses
+/// the creation.
 pub async fn create(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -59,12 +60,14 @@ pub async fn create(
                 .map(|(id,)| id)
                 .ok_or_else(|| ApiError::bad_request("unknown_member"))?;
         if id != authed.user_id {
-            blocked_between(&state, authed.user_id, id).await?;
             member_ids.push(id);
         }
     }
     member_ids.sort_unstable();
     member_ids.dedup();
+    let mut everyone = member_ids.clone();
+    everyone.push(authed.user_id);
+    blocked_among(&state, &everyone, &[]).await?;
     if group_too_large(state.cfg.max_group_members, member_ids.len() + 1) {
         return Err(ApiError::bad_request("group_too_large"));
     }
@@ -128,6 +131,11 @@ pub async fn send_message(
     body: Bytes,
 ) -> Result<impl IntoResponse, ApiError> {
     let authed = auth::authenticate(&state, &headers).await?;
+    state.limiter.check_keyed(
+        crate::ratelimit::Limit::Send,
+        &authed.device_id,
+        state.cfg.messages_per_device_per_minute,
+    )?;
     if body.is_empty() {
         return Err(ApiError::bad_request("empty_message"));
     }
@@ -144,8 +152,14 @@ pub async fn send_message(
     if member.is_none() {
         return Err(ApiError::not_found());
     }
-    let (message_id, recipients) =
-        messages::store_message(&state.db, &conversation_id, &authed.device_id, &body).await?;
+    let (message_id, recipients) = messages::store_message(
+        &state.db,
+        &conversation_id,
+        (authed.user_id, &authed.device_id),
+        &body,
+        state.cfg.queued_bytes_per_account,
+    )
+    .await?;
     // Opportunistically drop expired undelivered messages.
     let keep_older_than = crate::accounts::now() - state.cfg.queue_ttl_seconds;
     let _ = messages::cleanup_expired(&state.db, keep_older_than).await;
@@ -179,20 +193,68 @@ fn validate_name(raw: &str) -> Result<String, ApiError> {
     Ok(raw.trim().to_string())
 }
 
-/// Fail with 403 when either side blocks the other.
-pub(crate) async fn blocked_between(state: &AppState, a: i64, b: i64) -> Result<(), ApiError> {
-    let blocked = sqlx::query_as::<_, (i64,)>(
-        "SELECT 1 FROM blocks WHERE (user_id = $1 AND blocked_user_id = $2)
-         OR (user_id = $2 AND blocked_user_id = $1)",
-    )
-    .bind(a)
-    .bind(b)
-    .fetch_optional(&state.db)
-    .await?;
-    if blocked.is_some() {
+/// Fail with 403 when any newcomer and any other person in the resulting
+/// group block each other, either way, or two newcomers do (decision 0007).
+pub(crate) async fn blocked_among(
+    state: &AppState,
+    newcomers: &[i64],
+    others: &[i64],
+) -> Result<(), ApiError> {
+    if newcomers.is_empty() {
+        return Ok(());
+    }
+    let placeholders = (1..=newcomers.len())
+        .map(|n| format!("${n}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT user_id, blocked_user_id FROM blocks
+         WHERE user_id IN ({placeholders}) OR blocked_user_id IN ({placeholders})"
+    );
+    let mut query = sqlx::query_as::<_, (i64, i64)>(&sql);
+    for id in newcomers {
+        query = query.bind(id);
+    }
+    let pairs = query.fetch_all(&state.db).await?;
+    let in_group = |id: i64| newcomers.contains(&id) || others.contains(&id);
+    let joins_newcomer = |a: i64, b: i64| {
+        (newcomers.contains(&a) && in_group(b)) || (newcomers.contains(&b) && in_group(a))
+    };
+    if pairs.iter().any(|&(a, b)| a != b && joins_newcomer(a, b)) {
         return Err(ApiError::forbidden("blocked"));
     }
     Ok(())
+}
+
+/// Hold the conversation's row for the rest of `tx`, so membership
+/// changes that overlap are counted one after another. PostgreSQL locks the
+/// row; SQLite takes its write lock at this first write. False when there
+/// is no such conversation.
+pub(crate) async fn lock_conversation(
+    tx: &mut sqlx::Transaction<'_, sqlx::Any>,
+    conversation_id: &str,
+) -> Result<bool, sqlx::Error> {
+    Ok(
+        sqlx::query("UPDATE conversations SET name = name WHERE id = $1")
+            .bind(conversation_id)
+            .execute(&mut **tx)
+            .await?
+            .rows_affected()
+            > 0,
+    )
+}
+
+/// The user ids of a conversation's members.
+pub(crate) async fn member_ids(
+    state: &AppState,
+    conversation_id: &str,
+) -> Result<Vec<i64>, ApiError> {
+    Ok(sqlx::query_scalar::<_, i64>(
+        "SELECT user_id FROM conversation_members WHERE conversation_id = $1",
+    )
+    .bind(conversation_id)
+    .fetch_all(&state.db)
+    .await?)
 }
 
 /// Fail with 403 when `user_id` is not the conversation's admin.

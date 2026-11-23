@@ -14,7 +14,7 @@ use crate::accounts;
 use crate::auth;
 use crate::client_ip::{self, TrustedNet};
 use crate::error::ApiError;
-use crate::ratelimit::Limit;
+use crate::ratelimit::{Limit, account_key};
 use crate::state::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -75,29 +75,26 @@ pub async fn login(
         Limit::Login,
         state.cfg.login_per_minute,
     )?;
-    let account_key = account_key(&body.username);
-    state
-        .limiter
-        .check_login_account(&account_key, state.cfg.login_per_account_per_minute)?;
+    let client = client_addr(&state, addr.ip(), &headers);
+    let account = account_key(&body.username);
+    state.limiter.check_login(&account, client, &state.cfg)?;
     match accounts::login(
         &state.db,
         &body.username,
         &body.password,
         &body.device_label,
+        state.cfg.max_devices_per_account,
     )
     .await
     {
         Ok(session) => {
-            state.limiter.clear_login_failures(&account_key);
+            state.limiter.clear_login_failures(&account, client);
             Ok(Json(session))
         }
         Err(error) if error.code == "invalid_credentials" => {
-            state.limiter.record_login_failure(
-                &account_key,
-                state.cfg.login_failures_before_backoff,
-                state.cfg.login_backoff_base_seconds,
-                state.cfg.login_backoff_cap_seconds,
-            );
+            state
+                .limiter
+                .record_login_failure(&account, client, &state.cfg);
             Err(error)
         }
         Err(error) => Err(error),
@@ -116,14 +113,6 @@ fn client_addr(state: &AppState, peer: std::net::IpAddr, headers: &HeaderMap) ->
     client_ip::client_ip(peer, headers, &trusted)
 }
 
-/// Canonical username when it is valid, otherwise the raw text, so failed
-/// guesses at one account share a bucket.
-fn account_key(username: &str) -> String {
-    thrum_core::UserName::new(username)
-        .map(|name| name.as_str().to_string())
-        .unwrap_or_else(|_| username.trim().to_ascii_lowercase())
-}
-
 /// `DELETE /v1/sessions/current`: log out this device.
 pub async fn logout(
     State(state): State<AppState>,
@@ -135,6 +124,7 @@ pub async fn logout(
         .bind(&authed.device_id)
         .execute(&state.db)
         .await?;
+    state.hub.disconnect(&[authed.device_id]);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -148,11 +138,25 @@ pub async fn export(
 }
 
 /// `DELETE /v1/account`: password-confirmed account deletion.
+///
+/// The password check counts toward the same per-address lockout and
+/// account ceiling as login, so a stolen token is not an unlimited password
+/// oracle.
 pub async fn delete_account(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(body): Json<account::DeleteAccountBody>,
 ) -> Result<StatusCode, ApiError> {
     let authed = auth::authenticate(&state, &headers).await?;
-    account::delete_account(State(state), authed, Json(body)).await
+    let client = client_addr(&state, addr.ip(), &headers);
+    let account = account_key(&authed.username);
+    state.limiter.check_login(&account, client, &state.cfg)?;
+    let limiter = state.limiter.clone();
+    let cfg = state.cfg.clone();
+    let result = account::delete_account(State(state), authed, Json(body)).await;
+    if matches!(&result, Err(error) if error.code == "invalid_credentials") {
+        limiter.record_login_failure(&account, client, &cfg);
+    }
+    result
 }

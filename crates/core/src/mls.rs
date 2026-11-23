@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 
+use crate::membership::{CommitChanges, Leaf, ServerRoster, check_commit, check_welcome};
 use openmls::prelude::*;
 use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::OpenMlsRustCrypto;
@@ -71,9 +72,11 @@ fn other<E: std::fmt::Display>(error: E) -> MlsError {
 /// [`process_incoming`](DeviceCrypto::process_incoming) and
 /// [`process_welcome`](DeviceCrypto::process_welcome) can come from
 /// another user or from the server, so such an assert would be a remote
-/// crash. These guards only ever wrap parsing and validation, which
-/// happen before any group state is touched: a caught panic leaves the
-/// device intact and surfaces as a typed error. Panics from later,
+/// crash. A caught panic surfaces as a typed error. Most guards wrap only
+/// parsing and validation, before any group state is touched; the welcome
+/// guard also covers the join itself, which is safe because
+/// [`process_welcome`](DeviceCrypto::process_welcome) restores the
+/// device's storage from a snapshot on any error. Panics from other,
 /// already-validated steps stay loud, as they would be genuine bugs.
 fn guard_panics<T>(work: impl FnOnce() -> Result<T, MlsError>) -> Result<T, MlsError> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).unwrap_or_else(|panic| {
@@ -94,6 +97,34 @@ pub fn member_identity(credential: &Credential) -> Result<String, MlsError> {
     String::from_utf8(credential.serialized_content().to_vec()).map_err(|_| MlsError::BadIdentity)
 }
 
+/// A leaf as the membership checks see it. Never fails: an identity that is
+/// not a UTF-8 basic credential is kept, replaced lossily, and marked.
+fn leaf_of(credential: &Credential, signature_key: &[u8]) -> Leaf {
+    let valid = credential.credential_type() == CredentialType::Basic
+        && std::str::from_utf8(credential.serialized_content()).is_ok();
+    Leaf {
+        identity: String::from_utf8_lossy(credential.serialized_content()).into_owned(),
+        valid_utf8: valid,
+        signature_key: signature_key.to_vec(),
+    }
+}
+
+/// Validate a serialized key package without any device state and return
+/// the identity it claims and its signature key. The server uses this to
+/// bind each device to one signature key.
+pub fn key_package_binding(package: &[u8]) -> Result<(String, Vec<u8>), MlsError> {
+    let provider = OpenMlsRustCrypto::default();
+    let key_package = guard_panics(|| {
+        KeyPackageIn::tls_deserialize_exact_bytes(package)
+            .map_err(other)?
+            .validate(provider.crypto(), ProtocolVersion::Mls10)
+            .map_err(other)
+    })?;
+    let leaf = key_package.leaf_node();
+    let identity = member_identity(leaf.credential())?;
+    Ok((identity, leaf.signature_key().as_slice().to_vec()))
+}
+
 /// Split `username#device-id`.
 pub fn split_identity(identity: &str) -> Option<(&str, &str)> {
     let (username, device_id) = identity.split_once('#')?;
@@ -112,6 +143,10 @@ pub enum Incoming {
     Commit,
     /// Nothing actionable (wrong epoch, not for this device, duplicate).
     Ignored,
+    /// A commit that the server's roster does not allow. Nothing was
+    /// merged and the device state is as it was before the call, so the
+    /// caller may refresh the roster and try the same message again.
+    Rejected(String),
 }
 
 /// A device's MLS state: key store, signer and credential.
@@ -162,6 +197,21 @@ impl DeviceCrypto {
     /// The device identity (`username#device-id`).
     pub fn identity(&self) -> &str {
         &self.identity
+    }
+
+    /// This device's signature public key.
+    pub fn signature_key(&self) -> Vec<u8> {
+        self.credential_with_key.signature_key.as_slice().to_vec()
+    }
+
+    /// A copy of every stored value, to restore if an operation on
+    /// untrusted input has to be undone.
+    fn snapshot(&self) -> std::collections::HashMap<Vec<u8>, Vec<u8>> {
+        self.provider.storage().values.read().unwrap().clone()
+    }
+
+    fn restore(&self, snapshot: std::collections::HashMap<Vec<u8>, Vec<u8>>) {
+        *self.provider.storage().values.write().unwrap() = snapshot;
     }
 
     /// The username part of the device identity.
@@ -271,6 +321,51 @@ impl DeviceCrypto {
         })?;
         let credential = key_package.leaf_node().credential();
         member_identity(credential)
+    }
+
+    /// Validate a fetched key package and return the identity it claims and
+    /// its signature key, so the caller can compare both with the server's
+    /// roster before adding it.
+    pub fn key_package_leaf(&self, package: &[u8]) -> Result<Leaf, MlsError> {
+        let key_package = guard_panics(|| {
+            KeyPackageIn::tls_deserialize_exact_bytes(package)
+                .map_err(other)?
+                .validate(self.provider.crypto(), ProtocolVersion::Mls10)
+                .map_err(other)
+        })?;
+        let leaf = key_package.leaf_node();
+        Ok(leaf_of(leaf.credential(), leaf.signature_key().as_slice()))
+    }
+
+    /// Check a key package the server returned for `identity` before this
+    /// device adds it: the package must be valid, claim exactly that
+    /// identity, and carry the signature key the server bound to it. The server
+    /// picks which bytes to hand out, so this keeps a malicious server from
+    /// steering a commit toward a device it controls.
+    pub fn check_key_package(
+        &self,
+        package: &[u8],
+        identity: &str,
+        server: &ServerRoster,
+    ) -> Result<(), String> {
+        let leaf = self
+            .key_package_leaf(package)
+            .map_err(|error| error.to_string())?;
+        if leaf.identity != identity {
+            return Err(format!(
+                "server returned a key package for {} instead of {identity}",
+                leaf.identity
+            ));
+        }
+        let changes = CommitChanges {
+            sender: Some(Leaf::new(self.identity(), self.signature_key())),
+            added: vec![leaf.clone()],
+            members_after: vec![leaf],
+            ..Default::default()
+        };
+        let mut with_self = server.clone();
+        with_self.add_device(self.identity(), None);
+        check_commit(&with_self, &changes)
     }
 
     /// A fresh one-time key package for this device.
@@ -388,8 +483,8 @@ impl DeviceCrypto {
         let index = group
             .members()
             .find_map(|member| {
-                let id = member_identity(&member.credential).ok()?;
-                (id == identity).then_some(member.index)
+                let leaf = leaf_of(&member.credential, &member.signature_key);
+                (leaf.identity == identity).then_some(member.index)
             })
             .ok_or(MlsError::UnknownMember)?;
         let (commit, _, _) = group
@@ -411,10 +506,36 @@ impl DeviceCrypto {
     /// Process one serialized MLS message (commit or application) received
     /// for a conversation. Never fails on messages this device cannot or
     /// should not process: those come back as [`Incoming::Ignored`].
+    ///
+    /// A commit is merged only when [`check_commit`] accepts it against
+    /// `roster`, the server's current view of the conversation. Otherwise
+    /// the device state is rolled back and [`Incoming::Rejected`] says why.
+    /// A commit that removes this device deletes the local group, so that a
+    /// later welcome can bring the device back.
+    ///
+    /// The sender of an application message is the credential of the leaf
+    /// that sent it in the epoch it was sent. A message from a leaf that is
+    /// no longer in the group, or whose slot another device now holds, is
+    /// ignored: removal ends a device's ability to speak as well as read.
     pub fn process_incoming(
         &self,
         conversation_id: &str,
         message: &[u8],
+        roster: &ServerRoster,
+    ) -> Result<Incoming, MlsError> {
+        let snapshot = self.snapshot();
+        let result = self.process_incoming_inner(conversation_id, message, roster);
+        if matches!(result, Ok(Incoming::Rejected(_)) | Err(_)) {
+            self.restore(snapshot);
+        }
+        result
+    }
+
+    fn process_incoming_inner(
+        &self,
+        conversation_id: &str,
+        message: &[u8],
+        roster: &ServerRoster,
     ) -> Result<Incoming, MlsError> {
         let mut group = match self.group(conversation_id)? {
             Some(group) => group,
@@ -430,53 +551,192 @@ impl DeviceCrypto {
             Ok(processed) => processed,
             Err(_) => return Ok(Incoming::Ignored),
         };
-        let sender = match processed.sender() {
-            Sender::Member(index) => match group.member_at(*index) {
-                Some(member) => member_identity(&member.credential)?,
-                None => return Ok(Incoming::Ignored),
-            },
-            _ => return Ok(Incoming::Ignored),
+        let Sender::Member(sender_index) = *processed.sender() else {
+            return Ok(Incoming::Ignored);
         };
+        let credential = processed.credential().clone();
+        let Some(current) = group.member_at(sender_index) else {
+            return Ok(Incoming::Ignored);
+        };
+        let sender_leaf = leaf_of(&current.credential, &current.signature_key);
         match processed.into_content() {
-            ProcessedMessageContent::ApplicationMessage(application) => Ok(Incoming::Application {
-                sender,
-                payload: application.into_bytes(),
-            }),
+            ProcessedMessageContent::ApplicationMessage(application) => {
+                if current.credential != credential || !sender_leaf.valid_utf8 {
+                    return Ok(Incoming::Ignored);
+                }
+                Ok(Incoming::Application {
+                    sender: sender_leaf.identity,
+                    payload: application.into_bytes(),
+                })
+            }
             ProcessedMessageContent::StagedCommitMessage(staged_commit) => {
+                let changes = commit_changes(&group, sender_index, &staged_commit);
+                if let Err(reason) = check_commit(roster, &changes) {
+                    return Ok(Incoming::Rejected(reason));
+                }
+                let removes_self = staged_commit.self_removed();
                 group
                     .merge_staged_commit(&self.provider, *staged_commit)
                     .map_err(other)?;
+                if removes_self || !group.is_active() {
+                    group.delete(self.provider.storage()).map_err(other)?;
+                }
                 Ok(Incoming::Commit)
             }
             _ => Ok(Incoming::Ignored),
         }
     }
 
-    /// Process a serialized welcome: join the group. Returns the group's
-    /// conversation id. Errors when the welcome is not for this device (the
-    /// key package it encrypts to is unknown here) or is stale.
-    pub fn process_welcome(&self, welcome_bytes: &[u8]) -> Result<String, MlsError> {
-        guard_panics(|| {
-            let welcome = Welcome::tls_deserialize_exact_bytes(welcome_bytes).map_err(other)?;
-            let staged = StagedWelcome::new_from_welcome(
-                &self.provider,
-                &join_config(),
-                welcome,
-                None, // the ratchet tree arrives inside the welcome
-            )
-            .map_err(other)?;
-            let group = staged.into_group(&self.provider).map_err(other)?;
-            Ok(String::from_utf8_lossy(group.group_id().as_slice()).into_owned())
-        })
+    /// Process a serialized welcome that arrived in `conversation_id`: join
+    /// the group. Returns the group's conversation id.
+    ///
+    /// The welcome is refused unless [`check_welcome`] accepts it: its group
+    /// must be this conversation, and each of its leaves an active device of
+    /// a member with its registered key. A device that already holds an
+    /// active group for the conversation refuses it too. On any refusal or
+    /// error the device state is rolled back, so the one-time key package
+    /// the welcome was meant for stays usable.
+    pub fn process_welcome(
+        &self,
+        conversation_id: &str,
+        welcome_bytes: &[u8],
+        roster: &ServerRoster,
+    ) -> Result<String, MlsError> {
+        let snapshot = self.snapshot();
+        let result =
+            guard_panics(|| self.process_welcome_inner(conversation_id, welcome_bytes, roster));
+        if result.is_err() {
+            self.restore(snapshot);
+        }
+        result
     }
 
-    /// The credential identities of all current group members.
+    fn process_welcome_inner(
+        &self,
+        conversation_id: &str,
+        welcome_bytes: &[u8],
+        roster: &ServerRoster,
+    ) -> Result<String, MlsError> {
+        let welcome = Welcome::tls_deserialize_exact_bytes(welcome_bytes).map_err(other)?;
+        let processed = ProcessedWelcome::new_from_welcome(&self.provider, &join_config(), welcome)
+            .map_err(other)?;
+        let group_id =
+            String::from_utf8_lossy(processed.unverified_group_info().group_id().as_slice())
+                .into_owned();
+        if group_id != conversation_id {
+            return Err(MlsError::Other(format!(
+                "welcome names group {group_id:?} but arrived in conversation {conversation_id:?}"
+            )));
+        }
+        if let Some(mut existing) = self.group(conversation_id)? {
+            if existing.is_active() {
+                return Err(MlsError::Other(
+                    "this device is already in the conversation's group".into(),
+                ));
+            }
+            // This device was removed earlier; drop the dead group so the
+            // new welcome can bring it back.
+            existing.delete(self.provider.storage()).map_err(other)?;
+        }
+        let staged = processed
+            .into_staged_welcome(&self.provider, None)
+            .map_err(other)?;
+        let members: Vec<Leaf> = staged
+            .members()
+            .map(|member| leaf_of(&member.credential, &member.signature_key))
+            .collect();
+        check_welcome(roster, conversation_id, &group_id, &self.identity, &members)
+            .map_err(MlsError::Other)?;
+        staged.into_group(&self.provider).map_err(other)?;
+        Ok(group_id)
+    }
+
+    /// The credential identities of all current group members. A leaf
+    /// whose identity is not UTF-8 is listed with replacement characters
+    /// rather than failing the whole call, so that it can still be removed.
     pub fn group_members(&self, conversation_id: &str) -> Result<Vec<String>, MlsError> {
         let group = self.group_mut(conversation_id)?;
-        group
+        Ok(group
             .members()
-            .map(|member| member_identity(&member.credential))
-            .collect::<Result<Vec<_>, _>>()
+            .map(|member| leaf_of(&member.credential, &member.signature_key).identity)
+            .collect())
+    }
+
+    /// Every current leaf with its signature key.
+    pub fn group_leaves(&self, conversation_id: &str) -> Result<Vec<Leaf>, MlsError> {
+        let group = self.group_mut(conversation_id)?;
+        Ok(group
+            .members()
+            .map(|member| leaf_of(&member.credential, &member.signature_key))
+            .collect())
+    }
+}
+
+/// Read what a staged commit would change, before merging it.
+fn commit_changes(
+    group: &MlsGroup,
+    sender_index: LeafNodeIndex,
+    staged: &StagedCommit,
+) -> CommitChanges {
+    let leaf_at = |index: LeafNodeIndex| {
+        group
+            .member_at(index)
+            .map(|member| leaf_of(&member.credential, &member.signature_key))
+    };
+    let sender = leaf_at(sender_index);
+    let added: Vec<Leaf> = staged
+        .add_proposals()
+        .map(|queued| {
+            let leaf = queued.add_proposal().key_package().leaf_node();
+            leaf_of(leaf.credential(), leaf.signature_key().as_slice())
+        })
+        .collect();
+    let removed_indexes: Vec<LeafNodeIndex> = staged
+        .remove_proposals()
+        .map(|queued| queued.remove_proposal().removed())
+        .collect();
+    let removed: Vec<Leaf> = removed_indexes
+        .iter()
+        .filter_map(|index| leaf_at(*index))
+        .collect();
+    let mut replaced: Vec<(LeafNodeIndex, Leaf)> = Vec::new();
+    let mut updated = Vec::new();
+    for queued in staged.update_proposals() {
+        if let Sender::Member(index) = queued.sender() {
+            let leaf = queued.update_proposal().leaf_node();
+            let after = leaf_of(leaf.credential(), leaf.signature_key().as_slice());
+            if let Some(before) = leaf_at(*index) {
+                updated.push((before, after.clone()));
+            }
+            replaced.push((*index, after));
+        }
+    }
+    if let Some(path_leaf) = staged.update_path_leaf_node() {
+        let after = leaf_of(path_leaf.credential(), path_leaf.signature_key().as_slice());
+        if let Some(before) = sender.clone() {
+            updated.push((before, after.clone()));
+        }
+        replaced.push((sender_index, after));
+    }
+    let mut members_after: Vec<Leaf> = group
+        .members()
+        .filter(|member| !removed_indexes.contains(&member.index))
+        .map(|member| {
+            replaced
+                .iter()
+                .rev()
+                .find(|(index, _)| *index == member.index)
+                .map(|(_, leaf)| leaf.clone())
+                .unwrap_or_else(|| leaf_of(&member.credential, &member.signature_key))
+        })
+        .collect();
+    members_after.extend(added.iter().cloned());
+    CommitChanges {
+        sender,
+        added,
+        removed,
+        updated,
+        members_after,
     }
 }
 
@@ -506,16 +766,54 @@ const MAX_PAST_EPOCHS: usize = 10;
 /// Write bytes with 0600 permissions on unix.
 #[cfg(not(target_arch = "wasm32"))]
 fn write_private(path: &Path, bytes: &[u8]) -> Result<(), MlsError> {
+    write_private_file(path, bytes).map_err(MlsError::Io)
+}
+
+/// Replace `path` with `bytes` so that a crash, power loss or full disk
+/// leaves either the old file or the new one, never a truncated mix. The
+/// file is readable by its owner only (mode 0600 on Unix) from the moment
+/// it exists.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn write_private_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
-    let mut file = std::fs::File::create(path).map_err(MlsError::Io)?;
+    let mut name = path
+        .file_name()
+        .ok_or_else(|| std::io::Error::other("no file name"))?
+        .to_os_string();
+    name.push(format!(".tmp-{}", std::process::id()));
+    let temp = path.with_file_name(name);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))
-            .map_err(MlsError::Io)?;
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
     }
-    file.write_all(bytes).map_err(MlsError::Io)?;
-    Ok(())
+    let result = (|| {
+        let mut file = options.open(&temp)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        std::fs::rename(&temp, path)?;
+        if let Some(parent) = path.parent()
+            && let Ok(dir) = std::fs::File::open(if parent.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                parent
+            })
+        {
+            let _ = dir.sync_all();
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
 }
 
 /// Read bytes from a state file.
@@ -549,6 +847,15 @@ mod tests {
         DeviceCrypto::generate(format!("{user}#device-{n}"))
     }
 
+    /// A server roster listing these devices with their keys bound.
+    fn roster_of(devices: &[&DeviceCrypto]) -> ServerRoster {
+        let mut roster = ServerRoster::new();
+        for device in devices {
+            roster.add_device(device.identity(), Some(device.signature_key()));
+        }
+        roster
+    }
+
     /// alice creates the group and adds bob's device.
     fn setup_two(alice: &DeviceCrypto, bob: &DeviceCrypto) -> (Vec<u8>, Vec<u8>) {
         let conversation = "conv-1";
@@ -557,7 +864,11 @@ mod tests {
             .add_members(conversation, &[bob.new_key_package().expect("kp")])
             .expect("add");
         let joined = bob
-            .process_welcome(&welcome.expect("welcome"))
+            .process_welcome(
+                conversation,
+                &welcome.expect("welcome"),
+                &roster_of(&[alice, bob]),
+            )
             .expect("join");
         assert_eq!(joined, conversation);
         let _ = commit;
@@ -573,9 +884,13 @@ mod tests {
         let bob = device("bob", 1);
         let (earlier, conversation) = setup_two(&alice, &bob);
         let conversation = String::from_utf8(conversation).unwrap();
+        let roster = roster_of(&[&alice, &bob]);
 
         let wire = alice.encrypt(&conversation, &earlier).expect("encrypt");
-        match bob.process_incoming(&conversation, &wire).expect("process") {
+        match bob
+            .process_incoming(&conversation, &wire, &roster)
+            .expect("process")
+        {
             Incoming::Application { sender, payload } => {
                 assert_eq!(sender, "alice#device-1");
                 assert_eq!(payload, earlier);
@@ -591,6 +906,7 @@ mod tests {
         let carol = device("carol", 1);
         let (earlier, conversation) = setup_two(&alice, &bob);
         let conversation = String::from_utf8(conversation).unwrap();
+        let roster = roster_of(&[&alice, &bob, &carol]);
 
         // Carol joins after the earlier message was encrypted.
         let (commit, welcome) = alice
@@ -598,18 +914,18 @@ mod tests {
             .expect("add carol");
         // Bob applies the commit so the group stays in sync.
         assert!(matches!(
-            bob.process_incoming(&conversation, &commit)
+            bob.process_incoming(&conversation, &commit, &roster)
                 .expect("process"),
             Incoming::Commit
         ));
         let joined = carol
-            .process_welcome(&welcome.expect("welcome"))
+            .process_welcome(&conversation, &welcome.expect("welcome"), &roster)
             .expect("join");
         assert_eq!(joined, conversation);
 
         // Even with the earlier ciphertext in hand, carol cannot read it.
         assert!(matches!(
-            carol.process_incoming(&conversation, &earlier),
+            carol.process_incoming(&conversation, &earlier, &roster),
             Ok(Incoming::Ignored) | Err(_)
         ));
     }
@@ -620,19 +936,22 @@ mod tests {
         let bob = device("bob", 1);
         let (earlier, conversation) = setup_two(&alice, &bob);
         let conversation = String::from_utf8(conversation).unwrap();
+        let mut roster = roster_of(&[&alice, &bob]);
         let earlier_wire = alice.encrypt(&conversation, &earlier).expect("encrypt");
         assert!(matches!(
-            bob.process_incoming(&conversation, &earlier_wire)
+            bob.process_incoming(&conversation, &earlier_wire, &roster)
                 .expect("process"),
             Incoming::Application { .. }
         ));
 
-        // Alice removes bob; bob processes the removal commit.
+        // The server removes bob, then alice removes his leaf; bob
+        // processes the removal commit.
+        roster = roster_of(&[&alice]);
         let commit = alice
             .remove_member(&conversation, "bob#device-1")
             .expect("remove");
         assert!(matches!(
-            bob.process_incoming(&conversation, &commit)
+            bob.process_incoming(&conversation, &commit, &roster)
                 .expect("process"),
             Incoming::Commit
         ));
@@ -642,7 +961,7 @@ mod tests {
             .encrypt(&conversation, b"after removal")
             .expect("encrypt");
         assert!(matches!(
-            bob.process_incoming(&conversation, &later),
+            bob.process_incoming(&conversation, &later, &roster),
             Ok(Incoming::Ignored) | Err(_)
         ));
     }
@@ -679,12 +998,13 @@ mod tests {
 
         // Second process: the state is loaded fresh from disk.
         let bob2 = DeviceCrypto::load(dir.path()).expect("load");
+        let roster = roster_of(&[&alice, &bob2]);
         assert_eq!(bob2.identity(), bob.identity());
 
         alice.create_group("conv-1").expect("create");
         let (_commit, welcome) = alice.add_members("conv-1", &[package]).expect("add");
         let joined = bob2
-            .process_welcome(&welcome.expect("welcome"))
+            .process_welcome("conv-1", &welcome.expect("welcome"), &roster)
             .expect("reloaded device must unwrap the welcome");
         assert_eq!(joined, "conv-1");
     }
@@ -731,16 +1051,24 @@ mod tests {
             .add_members("conv-1", std::slice::from_ref(&package))
             .expect("first add");
         assert_eq!(
-            bob.process_welcome(&welcome.expect("welcome"))
-                .expect("join"),
+            bob.process_welcome(
+                "conv-1",
+                &welcome.expect("welcome"),
+                &roster_of(&[&alice, &bob])
+            )
+            .expect("join"),
             "conv-1"
         );
 
         alice.create_group("conv-2").expect("create");
         let (_commit, welcome) = alice.add_members("conv-2", &[package]).expect("second add");
         assert_eq!(
-            bob.process_welcome(&welcome.expect("welcome"))
-                .expect("rejoin"),
+            bob.process_welcome(
+                "conv-2",
+                &welcome.expect("welcome"),
+                &roster_of(&[&alice, &bob])
+            )
+            .expect("rejoin"),
             "conv-2"
         );
     }

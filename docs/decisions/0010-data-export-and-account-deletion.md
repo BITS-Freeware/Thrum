@@ -16,17 +16,18 @@ server knows about the calling user:
 - `devices`: id, label, creation and revocation times;
 - `conversations`: id, name, creation time, when the user joined, the
   member list and the owner, for every conversation the user belongs to;
-- `messages`: every message in those conversations — id, conversation,
-  sender name, time, and the payload the server stored;
+- `messages`: the messages the user's devices sent or were sent in those
+  conversations — id, conversation, sender name, time, and the payload the
+  server stored (decision 0016; this used to be every stored message);
 - `blobs`: the user's uploaded attachments as id, size, and timestamps.
 
 Message payloads are exported exactly as stored: ciphertext. The server
 cannot decrypt them (decision 0006), and the export must not become a
 side channel around that. A client that keeps its keys can decrypt its
 copy; the export itself is proof of what the server sees. The document is
-plain JSON, `Content-Disposition: attachment`, no pagination — a small
-server's export fits in memory, and an operator who worries about size
-sets the message TTL so undelivered data does not accumulate.
+plain JSON, `Content-Disposition: attachment`, in one response. The server
+reads the messages a page at a time and streams them (decision 0017), so a
+long history is never held in memory at once.
 
 ## Deletion
 
@@ -41,7 +42,8 @@ Deletion removes, in foreign-key-safe order:
    `blobs` rows — so the ciphertext bytes really leave the disk;
 2. invites the user minted (`invites.created_by` has no cascade);
 3. messages the user's devices sent (`messages.sender_device` has no
-   cascade); their delivery rows go with them;
+   cascade); their delivery rows go with them. Since decision 0016,
+   messages another member has not received yet are kept for them;
 4. the user's devices — cascading their key packages and queued
    deliveries, and killing every session at once;
 5. ownership of conversations the user owned passes to the member who

@@ -1,7 +1,7 @@
 //! Chat orchestration: ties the HTTP API, the WebSocket relay and the MLS
 //! layer together for the CLI commands.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -11,10 +11,12 @@ use rand::RngCore;
 use sha2::{Digest, Sha256};
 use thrum_core::attachment::{FileKey, KEY_LEN, NONCE_LEN};
 use thrum_core::envelope::{AppMessage, Envelope, decode_envelope, encode_envelope};
-use thrum_core::mls::{DeviceCrypto, Incoming};
+use thrum_core::membership::ServerRoster;
+use thrum_core::mls::{DeviceCrypto, Incoming, split_identity};
 use thrum_core::roster::{RosterAction, departed_members, plan_roster};
 
 use crate::api::Client;
+use crate::lock::DeviceLock;
 use crate::session::Session;
 use crate::store::{AttachmentMeta, Store};
 
@@ -43,7 +45,7 @@ impl SyncReport {
 
     fn log(&self) {
         for line in self.removed.iter().chain(&self.added).chain(&self.pending) {
-            eprintln!("{line}");
+            crate::errln!("{line}");
         }
     }
 }
@@ -58,12 +60,21 @@ pub struct Chat {
     attachments_dir: PathBuf,
     /// The device's view of what has been said; survives restarts.
     store: Mutex<Store>,
+    /// The server's view of each conversation, used to check welcomes and
+    /// commits; refreshed when a check fails.
+    rosters: Mutex<HashMap<String, ServerRoster>>,
+    /// Held while this process uses the device, so no other one does.
+    _lock: DeviceLock,
 }
 
 impl Chat {
     /// Open the MLS state for this session, creating fresh key material the
     /// first time. The state lives next to the session state file.
+    ///
+    /// Waits for any other process that has the same device open, so one
+    /// device never runs twice at once.
     pub fn open(client: Client, session: Session, state_file: &Path) -> Result<Self, String> {
+        let lock = DeviceLock::acquire(state_file, crate::lock::WAIT)?;
         let mls_dir = state_file_mls_dir(state_file);
         let crypto = if mls_dir.join("state.json").exists() {
             let crypto = DeviceCrypto::load(&mls_dir).map_err(|error| error.to_string())?;
@@ -94,13 +105,82 @@ impl Chat {
             crypto,
             mls_dir,
             attachments_dir: state_file_attachments_dir(state_file),
-            store: Mutex::new(Store::load(state_file)),
+            store: Mutex::new(Store::load(state_file)?),
+            rosters: Mutex::new(HashMap::new()),
+            _lock: lock,
         })
     }
 
     /// The device's MLS identity (`username#device-id`).
     pub fn identity(&self) -> &str {
         self.crypto.identity()
+    }
+
+    /// The server's view of a conversation: its members, their active
+    /// devices, and each device's registered signature key. Cached; pass
+    /// `refresh` to fetch it again.
+    async fn server_roster(
+        &self,
+        conversation_id: &str,
+        refresh: bool,
+    ) -> Result<ServerRoster, String> {
+        if !refresh
+            && let Some(roster) = self
+                .rosters
+                .lock()
+                .expect("roster lock")
+                .get(conversation_id)
+        {
+            return Ok(roster.clone());
+        }
+        let conversations = self.client.list_conversations(&self.session.token).await?;
+        let mut roster = ServerRoster::new();
+        if let Some((_, members)) = conversations.iter().find(|(id, _)| id == conversation_id) {
+            for member in members {
+                let devices = self
+                    .client
+                    .active_devices_with_keys(&self.session.token, member)
+                    .await?;
+                roster.add_account(member, devices);
+            }
+        }
+        self.apply_pins(&mut roster);
+        self.rosters
+            .lock()
+            .expect("roster lock")
+            .insert(conversation_id.to_string(), roster.clone());
+        Ok(roster)
+    }
+
+    /// Hold every listed device to the key this client pinned for it.
+    /// Returns the identities whose key the server now reports differently.
+    fn apply_pins(&self, roster: &mut ServerRoster) -> Vec<String> {
+        let pins = self.store.lock().expect("store lock").pinned_keys();
+        let mut changed = Vec::new();
+        for (identity, key) in pins {
+            if roster.pin(&identity, &key) {
+                crate::errln!(
+                    "warning: the server reports a new signature key for {identity}; \
+                     it is not accepted until you run `thrum trust --device {identity}`"
+                );
+                changed.push(identity);
+            }
+        }
+        changed
+    }
+
+    /// Pin the keys of the conversation's current leaves that have none
+    /// yet. Called after this device accepted the group's state.
+    fn pin_group_keys(&self, conversation_id: &str) {
+        let Ok(leaves) = self.crypto.group_leaves(conversation_id) else {
+            return;
+        };
+        let leaves: Vec<(String, Vec<u8>)> = leaves
+            .into_iter()
+            .filter(|leaf| leaf.well_formed())
+            .map(|leaf| (leaf.identity, leaf.signature_key))
+            .collect();
+        self.store.lock().expect("store lock").pin_keys(&leaves);
     }
 
     /// Persist the MLS state after any group operation.
@@ -287,14 +367,18 @@ impl Chat {
     }
 
     /// Trust a device identity (`username#device-id`) so the next sync may
-    /// add it. Does not add it by itself.
+    /// add it, with whatever signature key it presents then. Does not add
+    /// it by itself.
     pub fn trust_device(&self, identity: &str) -> Result<(), String> {
         if thrum_core::mls::split_identity(identity).is_none() {
             return Err(format!(
                 "{identity} is not a device identity (expected username#device-id)"
             ));
         }
-        self.store.lock().expect("store lock").trust(identity);
+        self.store
+            .lock()
+            .expect("store lock")
+            .trust_new_key(identity);
         Ok(())
     }
 
@@ -318,17 +402,20 @@ impl Chat {
         let mut pending = Vec::new();
         let mut newly_trusted = Vec::new();
         let mut newly_known = Vec::new();
+        let mut server = ServerRoster::new();
         for member in members {
-            let active = self
+            let devices = self
                 .client
-                .active_devices(&self.session.token, member)
+                .active_devices_with_keys(&self.session.token, member)
                 .await?;
+            let active: Vec<String> = devices.iter().map(|(id, _)| id.clone()).collect();
+            server.add_account(member, devices);
             let admit_member = admit.iter().any(|name| name.eq_ignore_ascii_case(member));
             let known = self
                 .store
                 .lock()
                 .expect("store lock")
-                .knows_account(conversation_id, member);
+                .knows_account_anywhere(member);
             for action in plan_roster(
                 self.identity(),
                 &roster,
@@ -367,23 +454,33 @@ impl Chat {
             for member in &newly_known {
                 store.mark_known(conversation_id, member);
             }
-            store.set_pending(conversation_id, &pending);
         }
-        for identity in pending {
-            report.push(conversation_id, "pending", &identity);
-        }
+        let changed_keys = self.apply_pins(&mut server);
+        self.rosters
+            .lock()
+            .expect("roster lock")
+            .insert(conversation_id.to_string(), server.clone());
         for identity in to_remove {
+            // A device that left the server's list is no longer trusted: if
+            // it is ever listed again, it waits for the user.
+            self.store.lock().expect("store lock").untrust(&identity);
             match self.remove_identity(conversation_id, &identity).await {
                 Ok(()) => report.push(conversation_id, "removed", &identity),
                 Err(error) => {
                     // Another member may have removed it in the same moment.
-                    eprintln!("note: could not remove {identity}: {error}");
+                    crate::errln!("note: could not remove {identity}: {error}");
                 }
             }
         }
         let mut packages = Vec::new();
         let mut added = Vec::new();
         for (identity, device_id) in to_add {
+            // A device whose key changed since this client pinned it waits
+            // for the user, like a new device.
+            if changed_keys.contains(&identity) {
+                pending.push(identity);
+                continue;
+            }
             let Some(package) = self
                 .client
                 .fetch_key_package(&self.session.token, &device_id)
@@ -391,8 +488,33 @@ impl Chat {
             else {
                 continue;
             };
-            packages.push(checked_key_package(&self.crypto, &package, &identity)?);
-            added.push(identity);
+            match self.crypto.check_key_package(&package, &identity, &server) {
+                Ok(()) => {
+                    packages.push(package);
+                    added.push(identity);
+                }
+                // One bad package must not stop the rest of the sync, which
+                // may hold removals and other conversations.
+                Err(error) => {
+                    crate::errln!("warning: not adding {identity}: {error}");
+                    let pinned = self
+                        .store
+                        .lock()
+                        .expect("store lock")
+                        .pinned_key(&identity)
+                        .is_some();
+                    if pinned {
+                        pending.push(identity);
+                    }
+                }
+            }
+        }
+        self.store
+            .lock()
+            .expect("store lock")
+            .set_pending(conversation_id, &pending);
+        for identity in &pending {
+            report.push(conversation_id, "pending", identity);
         }
         if !packages.is_empty() {
             let (commit, welcome) = self
@@ -400,6 +522,7 @@ impl Chat {
                 .add_members(conversation_id, &packages)
                 .map_err(|error| error.to_string())?;
             self.persist()?;
+            self.pin_group_keys(conversation_id);
             if let Some(welcome) = welcome {
                 let payload = encode_envelope(&Envelope::welcome(&welcome));
                 self.client
@@ -466,8 +589,9 @@ impl Chat {
                 once: false,
                 timeout_secs: 1,
             },
-            |conversation, message_id, sender, payload| {
+            async |conversation: &str, message_id: &str, sender: &str, payload: &[u8]| {
                 self.interpret(conversation, message_id, sender, payload)
+                    .await
             },
             |_| {},
         )
@@ -578,6 +702,9 @@ impl Chat {
         let meta = entry
             .attachment
             .ok_or_else(|| format!("message {message_id} carries no attachment"))?;
+        if !thrum_core::attachment::is_blob_id(&meta.blob_id) {
+            return Err("the attachment has an invalid id; not fetching".to_string());
+        }
         let key = FileKey {
             key: decode_b64(&meta.key_b64)
                 .ok()
@@ -608,7 +735,7 @@ impl Chat {
                     std::fs::create_dir_all(parent)
                         .map_err(|error| format!("cannot create {parent:?}: {error}"))?;
                 }
-                std::fs::write(out, &plaintext)
+                thrum_core::mls::write_private_file(out, &plaintext)
                     .map_err(|error| format!("cannot write {}: {error}", out.display()))?;
                 Ok(out.to_path_buf())
             }
@@ -724,7 +851,29 @@ impl Chat {
 
     /// Turn one relay payload into a display line, applying the MLS state
     /// changes it carries. `None` means nothing to show.
-    pub fn interpret(
+    ///
+    /// Welcomes and commits are checked against the server's roster of the
+    /// conversation; a refused one is tried once more with a fresh roster,
+    /// because the server changes membership just before the MLS commit
+    /// that follows it. Application messages are attributed to their MLS
+    /// sender; a relay label that names someone else is treated as
+    /// tampering and the message is dropped.
+    ///
+    /// The line is safe to print: peer-chosen text in it has its control
+    /// characters escaped (see [`crate::display::clean`]).
+    pub async fn interpret(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+        sender_username: &str,
+        payload: &[u8],
+    ) -> Option<String> {
+        self.interpret_raw(conversation_id, message_id, sender_username, payload)
+            .await
+            .map(|line| crate::display::clean(&line))
+    }
+
+    async fn interpret_raw(
         &self,
         conversation_id: &str,
         message_id: &str,
@@ -734,44 +883,91 @@ impl Chat {
         let envelope = decode_envelope(payload)?;
         let data = envelope.data()?;
         match envelope {
-            Envelope::Welcome { .. } => match self.crypto.process_welcome(&data) {
-                Ok(group_conversation) => {
-                    // The new group state must reach disk before the process
-                    // ends, or the next run knows nothing about the join.
-                    if let Err(error) = self.persist() {
-                        eprintln!("warning: could not save MLS state: {error}");
+            Envelope::Welcome { .. } => {
+                let mut outcome = Err(String::new());
+                for refresh in [false, true] {
+                    let roster = match self.server_roster(conversation_id, refresh).await {
+                        Ok(roster) => roster,
+                        Err(error) => {
+                            crate::errln!("welcome not applied: {error}");
+                            return None;
+                        }
+                    };
+                    outcome = self
+                        .crypto
+                        .process_welcome(conversation_id, &data, &roster)
+                        .map_err(|error| error.to_string());
+                    if outcome.is_ok() {
+                        break;
                     }
-                    Some(format!("joined {group_conversation}"))
                 }
-                Err(error) => {
-                    eprintln!("welcome not applied: {error}"); // stale or foreign
-                    None
+                match outcome {
+                    Ok(group_conversation) => {
+                        // The new group state must reach disk before the
+                        // process ends, or the next run knows nothing about
+                        // the join.
+                        if let Err(error) = self.persist() {
+                            crate::errln!("warning: could not save MLS state: {error}");
+                        }
+                        self.pin_group_keys(&group_conversation);
+                        Some(format!("joined {group_conversation}"))
+                    }
+                    Err(error) => {
+                        crate::errln!("welcome not applied: {error}"); // stale, foreign or forged
+                        None
+                    }
                 }
-            },
+            }
             Envelope::Mls { .. } => {
                 let before = self
                     .crypto
                     .group_members(conversation_id)
                     .unwrap_or_default();
-                match self.crypto.process_incoming(conversation_id, &data) {
-                    Ok(Incoming::Application { payload, .. }) => self.apply_app_message(
-                        conversation_id,
-                        message_id,
-                        sender_username,
-                        &payload,
-                    ),
+                let mut incoming = Ok(Incoming::Ignored);
+                for refresh in [false, true] {
+                    let roster = match self.server_roster(conversation_id, refresh).await {
+                        Ok(roster) => roster,
+                        Err(error) => {
+                            crate::errln!("message not applied: {error}");
+                            return None;
+                        }
+                    };
+                    incoming = self
+                        .crypto
+                        .process_incoming(conversation_id, &data, &roster);
+                    if !matches!(incoming, Ok(Incoming::Rejected(_))) {
+                        break;
+                    }
+                }
+                match incoming {
+                    Ok(Incoming::Application { sender, payload }) => {
+                        let (username, _) = split_identity(&sender)?;
+                        if !username.eq_ignore_ascii_case(sender_username) {
+                            crate::errln!(
+                                "warning: dropped a message labeled {sender_username} \
+                                 that {sender} sent"
+                            );
+                            return None;
+                        }
+                        self.apply_app_message(conversation_id, message_id, username, &payload)
+                    }
                     Ok(Incoming::Commit) => {
                         let after = self
                             .crypto
                             .group_members(conversation_id)
                             .unwrap_or_default();
                         self.persist().ok()?;
+                        self.pin_group_keys(conversation_id);
                         let note = roster_note(&before, &after);
                         if note.is_empty() { None } else { Some(note) }
                     }
+                    Ok(Incoming::Rejected(reason)) => {
+                        crate::errln!("commit refused: {reason}");
+                        None
+                    }
                     Ok(Incoming::Ignored) => None,
                     Err(error) => {
-                        eprintln!("message not applied: {error}"); // not for this device
+                        crate::errln!("message not applied: {error}"); // not for this device
                         None
                     }
                 }
@@ -805,7 +1001,7 @@ impl Chat {
                 if store.entry(conversation_id, message_id).is_none() {
                     store.record(conversation_id, message_id, sender, &text);
                 }
-                let short = &reply_to[..reply_to.len().min(8)];
+                let short: String = reply_to.chars().take(8).collect();
                 Some(format!("{sender}: [re:{short}] {text}"))
             }
             AppMessage::Edit {
@@ -839,6 +1035,11 @@ impl Chat {
                 size,
                 sha256,
             } => {
+                if !thrum_core::attachment::is_blob_id(&blob_id) {
+                    return Some(format!(
+                        "{sender} sent an attachment with an invalid id; ignored"
+                    ));
+                }
                 if store.entry(conversation_id, message_id).is_none() {
                     let meta = AttachmentMeta {
                         blob_id,
@@ -877,6 +1078,32 @@ fn roster_note(before: &[String], after: &[String]) -> String {
         }
     }
     parts.join(", ")
+}
+
+/// Remove everything this device keeps next to `state_file`: the session
+/// (its token), the MLS keys, the message store with its history and trust
+/// decisions, and saved attachments. Returns what was removed; a path that
+/// was not there is skipped.
+pub fn forget_device(state_file: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut removed = Vec::new();
+    for path in [
+        state_file.to_path_buf(),
+        crate::store::store_path(state_file),
+        state_file_mls_dir(state_file),
+        state_file_attachments_dir(state_file),
+    ] {
+        let result = if path.is_dir() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        match result {
+            Ok(()) => removed.push(path),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("cannot remove {}: {error}", path.display())),
+        }
+    }
+    Ok(removed)
 }
 
 /// The MLS state directory for a state file: `<state-file>.mls/`.
@@ -928,26 +1155,6 @@ pub fn payload_to_base64(bytes: &[u8]) -> String {
     thrum_core::protocol::encode_payload(bytes)
 }
 
-/// A fetched key package may only enter a commit when it claims the
-/// identity of the device it was fetched for: the server picks which bytes
-/// to hand out, and a malicious server must not steer a commit toward a
-/// device it controls (threat model, curious server operator).
-fn checked_key_package(
-    crypto: &thrum_core::mls::DeviceCrypto,
-    package: &[u8],
-    identity: &str,
-) -> Result<Vec<u8>, String> {
-    let claimed = crypto
-        .key_package_identity(package)
-        .map_err(|error| error.to_string())?;
-    if claimed != identity {
-        return Err(format!(
-            "server returned a key package for {claimed} instead of {identity}"
-        ));
-    }
-    Ok(package.to_vec())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -957,17 +1164,36 @@ mod tests {
     fn a_mismatched_key_package_is_rejected() {
         let alice = DeviceCrypto::generate("alice#device-1".to_string());
         let bob = DeviceCrypto::generate("bob#device-1".to_string());
+        let mut server = ServerRoster::new();
+        server.add_device("bob#device-1", Some(bob.signature_key()));
+        server.add_device("carol#device-1", None);
         // The right pairing passes through unchanged.
         let package = bob.new_key_package().expect("key package");
-        let checked =
-            checked_key_package(&alice, &package, "bob#device-1").expect("matching identity");
-        assert_eq!(checked, package);
+        alice
+            .check_key_package(&package, "bob#device-1", &server)
+            .expect("matching identity");
         // The same bytes offered for a different device are refused.
-        let error = checked_key_package(&alice, &package, "carol#device-1")
+        let error = alice
+            .check_key_package(&package, "carol#device-1", &server)
             .expect_err("swapped identity must fail");
         assert!(
             error.contains("bob#device-1") && error.contains("carol#device-1"),
             "error names both identities: {error}"
+        );
+    }
+
+    #[test]
+    fn a_key_package_with_another_key_than_the_registered_one_is_rejected() {
+        let alice = DeviceCrypto::generate("alice#device-1".to_string());
+        let bob = DeviceCrypto::generate("bob#device-1".to_string());
+        let impostor = DeviceCrypto::generate("bob#device-1".to_string());
+        let mut server = ServerRoster::new();
+        server.add_device("bob#device-1", Some(bob.signature_key()));
+        let package = impostor.new_key_package().expect("key package");
+        assert!(
+            alice
+                .check_key_package(&package, "bob#device-1", &server)
+                .is_err()
         );
     }
 }

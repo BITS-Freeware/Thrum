@@ -75,20 +75,91 @@ pub async fn upload(
     })?;
 
     let expires_at = accounts::now() + state.cfg.blob_retention_seconds;
-    if let Err(error) =
-        blobs::insert_blob(&state.db, &id, authed.user_id, body.len(), expires_at).await
+    match record_upload(
+        &state,
+        &id,
+        authed.user_id,
+        body.len(),
+        day_start,
+        expires_at,
+    )
+    .await
     {
-        // Do not leave an unreferenced object behind.
-        let _ = state.blob_store.delete(&id).await;
-        if matches!(error, SqlxError::Database(_)) {
-            // Almost certainly the pre-check losing a race.
-            return Err(ApiError::conflict("blob_exists"));
+        Ok(()) => {}
+        Err(Recorded::OverQuota) => {
+            let _ = state.blob_store.delete(&id).await;
+            return Err(ApiError::new(
+                StatusCode::TOO_MANY_REQUESTS,
+                "quota_exceeded",
+            ));
         }
-        eprintln!("blob insert failed: {error}");
-        return Err(error.into());
+        Err(Recorded::Failed(error)) => {
+            // Do not leave an unreferenced object behind.
+            let _ = state.blob_store.delete(&id).await;
+            if matches!(error, SqlxError::Database(_)) {
+                // Almost certainly the pre-check losing a race.
+                return Err(ApiError::conflict("blob_exists"));
+            }
+            eprintln!("blob insert failed: {error}");
+            return Err(error.into());
+        }
     }
 
     Ok((StatusCode::CREATED, Json(json!({ "id": id }))))
+}
+
+/// Why an upload could not be recorded.
+enum Recorded {
+    OverQuota,
+    Failed(SqlxError),
+}
+
+impl From<SqlxError> for Recorded {
+    fn from(error: SqlxError) -> Self {
+        Self::Failed(error)
+    }
+}
+
+/// Check the day's quota again and insert the blob row, under a lock on
+/// the uploader's account row, so parallel uploads cannot pass the quota
+/// together. The check before storing the object only saves work.
+async fn record_upload(
+    state: &AppState,
+    id: &str,
+    user_id: i64,
+    size: usize,
+    day_start: i64,
+    expires_at: i64,
+) -> Result<(), Recorded> {
+    let mut tx = state.db.begin().await?;
+    sqlx::query("UPDATE users SET created_at = created_at WHERE id = $1")
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+    let used: i64 = sqlx::query_scalar(
+        "SELECT CAST(COALESCE(SUM(size), 0) AS BIGINT) FROM blobs
+         WHERE uploader_id = $1 AND created_at >= $2",
+    )
+    .bind(user_id)
+    .bind(day_start)
+    .fetch_one(&mut *tx)
+    .await?;
+    if (used.max(0) as u64).saturating_add(size as u64) > state.cfg.daily_upload_bytes {
+        return Err(Recorded::OverQuota);
+    }
+    sqlx::query(
+        "INSERT INTO blobs (id, uploader_id, size, expires_at, created_at)
+         VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(id)
+    .bind(user_id)
+    .bind(size as i64)
+    .bind(expires_at)
+    .bind(accounts::now())
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
 }
 
 /// `GET /v1/blobs/{id}`: fetch an encrypted blob by id. Any authenticated

@@ -194,12 +194,12 @@ async fn main() {
     let base = match thrum_cli::normalize_base_url(&cli.server) {
         Ok(base) => base,
         Err(error) => {
-            eprintln!("error: {error}");
+            thrum_cli::errln!("error: {error}");
             std::process::exit(2);
         }
     };
     if let Err(error) = run(&cli, &base).await {
-        eprintln!("error: {error}");
+        thrum_cli::errln!("error: {error}");
         std::process::exit(1);
     }
 }
@@ -209,7 +209,7 @@ async fn run(cli: &Cli, base: &str) -> Result<(), String> {
     match &cli.command {
         Command::Register { username, password } => {
             client.register(username, password).await?;
-            println!("registered {username}");
+            thrum_cli::outln!("registered {username}");
         }
         Command::Login {
             username,
@@ -220,9 +220,10 @@ async fn run(cli: &Cli, base: &str) -> Result<(), String> {
             session::save(&cli.state_file, &session)?;
             let chat = Chat::open(client.clone(), session.clone(), &cli.state_file)?;
             chat.top_up_key_packages().await?;
-            println!(
+            thrum_cli::outln!(
                 "logged in {} (device {})",
-                session.username, session.device_id
+                session.username,
+                session.device_id
             );
         }
         Command::Create { members, name } => {
@@ -232,13 +233,13 @@ async fn run(cli: &Cli, base: &str) -> Result<(), String> {
             let id = chat
                 .create_conversation(&list, name.as_deref().unwrap_or(""))
                 .await?;
-            println!("conversation {id}");
+            thrum_cli::outln!("conversation {id}");
         }
         Command::Rename { conversation, name } => {
             let session = load_session(&cli.state_file, base)?;
             let chat = Chat::open(client, session, &cli.state_file)?;
             chat.rename(conversation, name).await?;
-            println!("renamed {conversation}");
+            thrum_cli::outln!("renamed {conversation}");
         }
         Command::Send {
             conversation,
@@ -251,7 +252,7 @@ async fn run(cli: &Cli, base: &str) -> Result<(), String> {
                 Some(original) => chat.send_reply(conversation, original, text).await?,
                 None => chat.send_text(conversation, text).await?,
             };
-            println!("sent {id}");
+            thrum_cli::outln!("sent {id}");
         }
         Command::Edit { message, text } => {
             let session = load_session(&cli.state_file, base)?;
@@ -263,7 +264,7 @@ async fn run(cli: &Cli, base: &str) -> Result<(), String> {
                 return Err(format!("message {message} is not yours to edit"));
             }
             chat.send_edit(&conversation, message, text).await?;
-            println!("edited {message}");
+            thrum_cli::outln!("edited {message}");
         }
         Command::Delete { message } => {
             let session = load_session(&cli.state_file, base)?;
@@ -275,25 +276,25 @@ async fn run(cli: &Cli, base: &str) -> Result<(), String> {
                 return Err(format!("message {message} is not yours to delete"));
             }
             chat.send_delete(&conversation, message).await?;
-            println!("deleted {message}");
+            thrum_cli::outln!("deleted {message}");
         }
         Command::Attach { conversation, file } => {
             let session = load_session(&cli.state_file, base)?;
             let chat = Chat::open(client, session, &cli.state_file)?;
             let id = chat.send_attachment(conversation, file).await?;
-            println!("sent {id}");
+            thrum_cli::outln!("sent {id}");
         }
         Command::Fetch { message, out } => {
             let session = load_session(&cli.state_file, base)?;
             let chat = Chat::open(client, session, &cli.state_file)?;
             let path = chat.fetch_attachment(message, out.as_deref()).await?;
-            println!("saved {}", path.display());
+            thrum_cli::outln!("saved {}", path.display());
         }
         Command::Read { conversation } => {
             let session = load_session(&cli.state_file, base)?;
             let chat = Chat::open(client, session, &cli.state_file)?;
             let count = chat.send_read(conversation).await?;
-            println!("sent read receipts for {count} message(s)");
+            thrum_cli::outln!("sent read receipts for {count} message(s)");
         }
         Command::Recv { once, timeout } => {
             let session = load_session(&cli.state_file, base)?;
@@ -301,7 +302,7 @@ async fn run(cli: &Cli, base: &str) -> Result<(), String> {
             // Best effort: pull in new devices and redeemed invitations
             // before listening, so fresh devices get their welcomes promptly.
             if let Err(error) = chat.sync().await {
-                eprintln!("note: sync failed: {error}");
+                thrum_cli::errln!("note: sync failed: {error}");
             }
             recv(
                 &chat.session,
@@ -309,10 +310,11 @@ async fn run(cli: &Cli, base: &str) -> Result<(), String> {
                     once: *once,
                     timeout_secs: *timeout,
                 },
-                |conversation, message_id, sender, payload| {
+                async |conversation: &str, message_id: &str, sender: &str, payload: &[u8]| {
                     chat.interpret(conversation, message_id, sender, payload)
+                        .await
                 },
-                |line| println!("{line}"),
+                |line| thrum_cli::outln!("{line}"),
             )
             .await?;
         }
@@ -324,7 +326,7 @@ async fn run(cli: &Cli, base: &str) -> Result<(), String> {
             let chat = Chat::open(client, session, &cli.state_file)?;
             let list = parse_member_list(members)?;
             chat.add_members(conversation, &list).await?;
-            println!("added {}", list.join(", "));
+            thrum_cli::outln!("added {}", list.join(", "));
         }
         Command::Remove {
             conversation,
@@ -333,13 +335,13 @@ async fn run(cli: &Cli, base: &str) -> Result<(), String> {
             let session = load_session(&cli.state_file, base)?;
             let chat = Chat::open(client, session, &cli.state_file)?;
             chat.remove_member(conversation, member).await?;
-            println!("removed {member}");
+            thrum_cli::outln!("removed {member}");
         }
         Command::Invite { conversation } => {
             let session = load_session(&cli.state_file, base)?;
             let chat = Chat::open(client, session, &cli.state_file)?;
             let token = chat.create_invite(conversation).await?;
-            println!("invite {token}");
+            thrum_cli::outln!("invite {token}");
         }
         Command::Revoke {
             conversation,
@@ -348,32 +350,34 @@ async fn run(cli: &Cli, base: &str) -> Result<(), String> {
             let session = load_session(&cli.state_file, base)?;
             let chat = Chat::open(client, session, &cli.state_file)?;
             chat.revoke_invite(conversation, token).await?;
-            println!("revoked");
+            thrum_cli::outln!("revoked");
         }
         Command::Join { token } => {
             let session = load_session(&cli.state_file, base)?;
             let chat = Chat::open(client, session, &cli.state_file)?;
             let conversation = chat.join(token).await?;
-            println!("joined conversation {conversation} on the server; run `recv` to catch up");
+            thrum_cli::outln!(
+                "joined conversation {conversation} on the server; run `recv` to catch up"
+            );
         }
         Command::Block { user } => {
             let session = load_session(&cli.state_file, base)?;
             let chat = Chat::open(client, session, &cli.state_file)?;
             chat.block(user).await?;
-            println!("blocked {user}");
+            thrum_cli::outln!("blocked {user}");
         }
         Command::Unblock { user } => {
             let session = load_session(&cli.state_file, base)?;
             let chat = Chat::open(client, session, &cli.state_file)?;
             chat.unblock(user).await?;
-            println!("unblocked {user}");
+            thrum_cli::outln!("unblocked {user}");
         }
         Command::Sync => {
             let session = load_session(&cli.state_file, base)?;
             let chat = Chat::open(client, session, &cli.state_file)?;
             let report = chat.sync().await?;
             report_lines(&report);
-            println!("synced");
+            thrum_cli::outln!("synced");
         }
         Command::Trust { device } => {
             let session = load_session(&cli.state_file, base)?;
@@ -381,31 +385,33 @@ async fn run(cli: &Cli, base: &str) -> Result<(), String> {
             chat.trust_device(device)?;
             let report = chat.sync().await?;
             report_lines(&report);
-            println!("trusted {device}");
+            thrum_cli::outln!("trusted {device}");
         }
         Command::RevokeDevice { device } => {
             let session = load_session(&cli.state_file, base)?;
             client.revoke_device(&session.token, device).await?;
-            println!("revoked {device}");
+            thrum_cli::outln!("revoked {device}");
         }
         Command::Whoami => {
             let session = load_session(&cli.state_file, base)?;
-            println!(
+            thrum_cli::outln!(
                 "{} on {} (device {})",
-                session.username, session.server, session.device_id
+                session.username,
+                session.server,
+                session.device_id
             );
         }
         Command::Export { out } => {
             let session = load_session(&cli.state_file, base)?;
             let document = client.export_account(&session.token).await?;
             let text = serde_json::to_string_pretty(&document).unwrap();
-            std::fs::write(out, text.as_bytes())
+            thrum_core::mls::write_private_file(out, text.as_bytes())
                 .map_err(|error| format!("write failed: {error}"))?;
             let msg_count = document["messages"]
                 .as_array()
                 .map(|a| a.len())
                 .unwrap_or(0);
-            println!(
+            thrum_cli::outln!(
                 "exported {} ({} message(s)) → {}",
                 document["account"]["username"],
                 msg_count,
@@ -418,12 +424,12 @@ async fn run(cli: &Cli, base: &str) -> Result<(), String> {
             }
             let session = load_session(&cli.state_file, base)?;
             client.delete_account(&session.token, password).await?;
-            // Remove the state file — the token is now dead.
-            std::fs::remove_file(&cli.state_file).ok(); // best effort; file may already be gone.
-            println!(
-                "account {} deleted; local session removed",
-                session.username
-            );
+            // The token is dead; the keys, history and attachments go too.
+            let removed = thrum_cli::chat::forget_device(&cli.state_file)?;
+            thrum_cli::outln!("account {} deleted", session.username);
+            for path in removed {
+                thrum_cli::outln!("removed {}", path.display());
+            }
         }
     }
     Ok(())
@@ -436,7 +442,7 @@ fn report_lines(report: &thrum_cli::chat::SyncReport) {
         .chain(&report.added)
         .chain(&report.pending)
     {
-        eprintln!("{line}");
+        thrum_cli::errln!("{line}");
     }
 }
 

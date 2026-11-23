@@ -6,6 +6,102 @@ All notable changes to Thrum are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-22
+
+This release fixes the issues described in the repository's
+[security advisories](https://github.com/BITS-Freeware/Thrum/security/advisories)
+for 0.2.0 and earlier. Upgrade the server and every client.
+
+### Security
+
+- Clients check every commit and welcome against the server's member list
+  and refuse changes it does not back: adding a leaf that is not a listed
+  device of a member, removing a member the server still lists, or joining a
+  group from a welcome meant for another conversation. A refused change
+  leaves the device as it was (decision 0014).
+- The server binds a signature key to each device from its first key
+  package and refuses packages with another key or another device's
+  identity. Clients compare leaves with these keys.
+- The sender shown for a message is the MLS credential that signed it. A
+  frame whose relay label disagrees is dropped, and a message from a removed
+  device is ignored.
+- A failed welcome no longer uses up the one-time key package it named.
+- One device runs in one place at a time. A CLI command waits while another
+  command uses the same device, and the web client runs in one tab and shows
+  a notice in the others (decision 0015).
+- The server keeps one live socket per device: a new connection closes the
+  older one, a closing connection no longer unregisters a newer one, and
+  revoking a device, logging out or deleting the account closes its socket.
+- The CLI replaces its state files atomically, readable by the owner only,
+  and refuses to start from a damaged message store instead of silently
+  forgetting trust decisions.
+- Clients pin each device's signature key on first sight. A known device with
+  another key waits for the user, trust on first use is per account rather
+  than per conversation, and a device listed again after its removal waits
+  for the user.
+- A deleted account's name cannot be registered again.
+- The web client applies frames it has received before sending.
+- Login limits keep only canonical names (every invalid name shares one
+  key), forget old failures, and cap login and registration bodies at
+  16 KiB, so failed logins no longer grow server memory without bound.
+- The login lockout and per-account limit are kept per client address, so a
+  stranger's guesses no longer lock the owner out. A new hourly ceiling
+  (`THRUM_LOGIN_FAILURES_PER_ACCOUNT_PER_HOUR`, default 100) bounds guesses
+  spread across addresses. IPv6 clients are limited per /64.
+- Wrong passwords on account deletion count toward the login limits, and
+  password hashing runs off the async workers.
+- A block between any two people in a conversation refuses creating it,
+  adding to it and redeeming its invites, not only blocks involving the
+  caller (decision 0016).
+- A member the admin removed cannot rejoin through an invite until the admin
+  adds them again.
+- An account export holds only messages the account sent or was sent.
+- Deleting an account keeps messages it sent that other members have not
+  received yet, so members who were offline still get the commits they
+  need; clients accept such a commit from an account that has since left.
+- The nginx example overwrites `X-Forwarded-For`, and the self-hosting guide
+  and Compose file say which `THRUM_TRUSTED_PROXIES` value a proxied install
+  needs.
+- The member cap holds for invites too, and for adds and redemptions that
+  overlap. Redeeming an invite again no longer spends a use (decision 0017).
+- Sends are limited per device (`THRUM_MESSAGES_PER_DEVICE_PER_MINUTE`,
+  default 120), and what an account has sent that is still queued is capped
+  (`THRUM_QUEUED_BYTES_PER_ACCOUNT`, default 100 MiB).
+- Catch-up on connect and the account export load messages a page at a
+  time instead of all at once.
+- Signed-in devices per account are capped
+  (`THRUM_MAX_DEVICES_PER_ACCOUNT`, default 20), and device labels are at
+  most 64 bytes.
+- Parallel uploads can no longer pass the daily upload quota together.
+- Key-package uploads and fetches of one device run one after another: the
+  stock cap holds, a device keeps one last-resort package (the newest), and
+  concurrent fetches on PostgreSQL take one-time packages while any remain.
+  `THRUM_KEY_PACKAGE_MAX_PER_DEVICE=0` now means unlimited, as documented.
+- Key-package fetches are also limited per caller and device
+  (`THRUM_KEY_PACKAGE_FETCH_PER_CALLER_DEVICE_PER_MINUTE`, default 10).
+  Past a device's overall ceiling, fetches get its last-resort package, so
+  one user can no longer stop others from adding a device or drain its
+  stock.
+- The web client acknowledges messages it can never read (no envelope, bad
+  base64, bytes that are not MLS for a group it is in), so they are not
+  replayed on every reconnect for a week.
+- The CLI escapes control characters and text-direction overrides in
+  everything it prints, so message text, attachment names and server
+  answers cannot move the cursor, rewrite earlier lines, set the window
+  title or write the clipboard.
+- The CLI no longer crashes on a reply whose quoted id has a multi-byte
+  character where it is shortened.
+- The CLI ignores an attachment whose blob id is not 32 hex characters, and
+  builds every request path from encoded segments, so an id from a peer or
+  the server cannot reach another route.
+- The CLI writes its session file (with the device token), saved
+  attachments, `fetch --out` files and exports readable by the owner only,
+  like its keys and message store. `delete-account` also removes the keys,
+  the history and the attachments directory.
+- The server creates its SQLite database and its blob files readable by its
+  own user only, and the container entrypoint sets `umask 077` and
+  tightens an existing `/data` volume.
+
 ## [0.2.0] - 2026-11-14
 
 ### Security
@@ -112,5 +208,7 @@ protection from the server operator, no at-rest encryption of client state,
 TLS termination is an operational requirement rather than code-enforced,
 and other items listed there.
 
+[Unreleased]: https://github.com/BITS-Freeware/Thrum/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/BITS-Freeware/Thrum/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/BITS-Freeware/Thrum/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/BITS-Freeware/Thrum/releases/tag/v0.1.0

@@ -19,6 +19,25 @@ pub struct Client {
 }
 
 impl Client {
+    /// The URL of an API route. Each segment is percent-encoded on its
+    /// own, so an id from a peer or the server cannot add path segments,
+    /// and the segments `.` and `..` are refused rather than resolved.
+    fn endpoint(&self, segments: &[&str]) -> Result<url::Url, String> {
+        if segments
+            .iter()
+            .any(|segment| segment.is_empty() || *segment == "." || *segment == "..")
+        {
+            return Err("invalid id in request path".to_string());
+        }
+        let mut url =
+            url::Url::parse(&self.base).map_err(|error| format!("bad server URL: {error}"))?;
+        url.path_segments_mut()
+            .map_err(|_| "bad server URL".to_string())?
+            .pop_if_empty()
+            .extend(segments);
+        Ok(url)
+    }
+
     pub fn new(base: String) -> Self {
         Self {
             base,
@@ -105,7 +124,7 @@ impl Client {
     ) -> Result<String, String> {
         let response = self
             .http
-            .post(format!("{}/v1/conversations", self.base))
+            .post(self.endpoint(&["v1", "conversations"])?)
             .bearer_auth(token)
             .json(&serde_json::json!({ "members": members }))
             .send()
@@ -131,7 +150,7 @@ impl Client {
     ) -> Result<(String, Vec<String>), String> {
         let response = self
             .http
-            .post(format!("{}/v1/conversations", self.base))
+            .post(self.endpoint(&["v1", "conversations"])?)
             .bearer_auth(token)
             .json(&serde_json::json!({ "members": members, "name": name }))
             .send()
@@ -164,7 +183,7 @@ impl Client {
     ) -> Result<Vec<(String, Vec<String>)>, String> {
         let response = self
             .http
-            .get(format!("{}/v1/conversations", self.base))
+            .get(self.endpoint(&["v1", "conversations"])?)
             .bearer_auth(token)
             .send()
             .await
@@ -201,10 +220,7 @@ impl Client {
     ) -> Result<Vec<String>, String> {
         let response = self
             .http
-            .post(format!(
-                "{}/v1/conversations/{conversation_id}/members",
-                self.base
-            ))
+            .post(self.endpoint(&["v1", "conversations", conversation_id, "members"])?)
             .bearer_auth(token)
             .json(&serde_json::json!({ "members": members }))
             .send()
@@ -234,10 +250,13 @@ impl Client {
     ) -> Result<(), String> {
         let response = self
             .http
-            .delete(format!(
-                "{}/v1/conversations/{conversation_id}/members/{username}",
-                self.base
-            ))
+            .delete(self.endpoint(&[
+                "v1",
+                "conversations",
+                conversation_id,
+                "members",
+                username,
+            ])?)
             .bearer_auth(token)
             .send()
             .await
@@ -253,10 +272,7 @@ impl Client {
     ) -> Result<Vec<String>, String> {
         let response = self
             .http
-            .get(format!(
-                "{}/v1/users/{username}/key-package-devices",
-                self.base
-            ))
+            .get(self.endpoint(&["v1", "users", username, "key-package-devices"])?)
             .bearer_auth(token)
             .send()
             .await
@@ -285,7 +301,7 @@ impl Client {
     ) -> Result<Option<Vec<u8>>, String> {
         let response = self
             .http
-            .get(format!("{}/v1/devices/{device_id}/key-package", self.base))
+            .get(self.endpoint(&["v1", "devices", device_id, "key-package"])?)
             .bearer_auth(token)
             .send()
             .await
@@ -305,7 +321,7 @@ impl Client {
     pub async fn upload_key_package(&self, token: &str, bytes: &[u8]) -> Result<(), String> {
         let response = self
             .http
-            .post(format!("{}/v1/key-packages", self.base))
+            .post(self.endpoint(&["v1", "key-packages"])?)
             .bearer_auth(token)
             .header("content-type", "application/octet-stream")
             .body(bytes.to_vec())
@@ -320,7 +336,7 @@ impl Client {
     pub async fn key_package_stock(&self, token: &str) -> Result<KeyPackageStock, String> {
         let response = self
             .http
-            .get(format!("{}/v1/key-packages/count", self.base))
+            .get(self.endpoint(&["v1", "key-packages", "count"])?)
             .bearer_auth(token)
             .send()
             .await
@@ -348,7 +364,7 @@ impl Client {
     ) -> Result<(), String> {
         let response = self
             .http
-            .post(format!("{}/v1/key-packages", self.base))
+            .post(self.endpoint(&["v1", "key-packages"])?)
             .bearer_auth(token)
             .header("content-type", "application/octet-stream")
             .header("x-thrum-key-package-role", "last-resort")
@@ -362,9 +378,25 @@ impl Client {
     /// Device ids of a user that are still signed in, whether or not they
     /// have a key package left.
     pub async fn active_devices(&self, token: &str, username: &str) -> Result<Vec<String>, String> {
+        Ok(self
+            .active_devices_with_keys(token, username)
+            .await?
+            .into_iter()
+            .map(|(device_id, _)| device_id)
+            .collect())
+    }
+
+    /// A user's signed-in devices, each with the signature key the server
+    /// bound to it (`None` before the device's first key package).
+    pub async fn active_devices_with_keys(
+        &self,
+        token: &str,
+        username: &str,
+    ) -> Result<Vec<(String, Option<Vec<u8>>)>, String> {
+        use base64::Engine as _;
         let response = self
             .http
-            .get(format!("{}/v1/users/{username}/devices", self.base))
+            .get(self.endpoint(&["v1", "users", username, "devices"])?)
             .bearer_auth(token)
             .send()
             .await
@@ -374,11 +406,20 @@ impl Client {
             .json()
             .await
             .map_err(|error| format!("bad device list: {error}"))?;
+        let keys = &body["signature_keys"];
         Ok(body["devices"]
             .as_array()
             .map(|list| {
                 list.iter()
                     .filter_map(|device| device.as_str().map(str::to_string))
+                    .map(|device_id| {
+                        let key = keys[&device_id].as_str().and_then(|encoded| {
+                            base64::engine::general_purpose::STANDARD
+                                .decode(encoded)
+                                .ok()
+                        });
+                        (device_id, key)
+                    })
                     .collect()
             })
             .unwrap_or_default())
@@ -388,7 +429,7 @@ impl Client {
     pub async fn revoke_device(&self, token: &str, device_id: &str) -> Result<(), String> {
         let response = self
             .http
-            .delete(format!("{}/v1/devices/{device_id}", self.base))
+            .delete(self.endpoint(&["v1", "devices", device_id])?)
             .bearer_auth(token)
             .send()
             .await
@@ -405,10 +446,7 @@ impl Client {
     ) -> Result<String, String> {
         let response = self
             .http
-            .post(format!(
-                "{}/v1/conversations/{conversation_id}/messages",
-                self.base
-            ))
+            .post(self.endpoint(&["v1", "conversations", conversation_id, "messages"])?)
             .bearer_auth(token)
             .header("content-type", "application/octet-stream")
             .body(payload.to_vec())
@@ -435,10 +473,7 @@ impl Client {
     ) -> Result<(), String> {
         let response = self
             .http
-            .patch(format!(
-                "{}/v1/conversations/{conversation_id}/name",
-                self.base
-            ))
+            .patch(self.endpoint(&["v1", "conversations", conversation_id, "name"])?)
             .bearer_auth(token)
             .json(&serde_json::json!({ "name": name }))
             .send()
@@ -455,10 +490,7 @@ impl Client {
     ) -> Result<String, String> {
         let response = self
             .http
-            .post(format!(
-                "{}/v1/conversations/{conversation_id}/invites",
-                self.base
-            ))
+            .post(self.endpoint(&["v1", "conversations", conversation_id, "invites"])?)
             .bearer_auth(token)
             .json(&serde_json::json!({}))
             .send()
@@ -484,10 +516,13 @@ impl Client {
     ) -> Result<(), String> {
         let response = self
             .http
-            .delete(format!(
-                "{}/v1/conversations/{conversation_id}/invites/{invite_token}",
-                self.base
-            ))
+            .delete(self.endpoint(&[
+                "v1",
+                "conversations",
+                conversation_id,
+                "invites",
+                invite_token,
+            ])?)
             .bearer_auth(token)
             .send()
             .await
@@ -503,7 +538,7 @@ impl Client {
     ) -> Result<(String, Vec<String>), String> {
         let response = self
             .http
-            .post(format!("{}/v1/invites/redeem", self.base))
+            .post(self.endpoint(&["v1", "invites", "redeem"])?)
             .bearer_auth(token)
             .json(&serde_json::json!({ "token": invite_token }))
             .send()
@@ -533,7 +568,7 @@ impl Client {
     pub async fn block(&self, token: &str, username: &str) -> Result<(), String> {
         let response = self
             .http
-            .post(format!("{}/v1/blocks", self.base))
+            .post(self.endpoint(&["v1", "blocks"])?)
             .bearer_auth(token)
             .json(&serde_json::json!({ "username": username }))
             .send()
@@ -546,7 +581,7 @@ impl Client {
     pub async fn unblock(&self, token: &str, username: &str) -> Result<(), String> {
         let response = self
             .http
-            .delete(format!("{}/v1/blocks/{username}", self.base))
+            .delete(self.endpoint(&["v1", "blocks", username])?)
             .bearer_auth(token)
             .send()
             .await
@@ -563,7 +598,7 @@ impl Client {
     ) -> Result<(), String> {
         let response = self
             .http
-            .post(format!("{}/v1/blobs", self.base))
+            .post(self.endpoint(&["v1", "blobs"])?)
             .bearer_auth(token)
             .header("content-type", "application/octet-stream")
             .header("x-thrum-blob-id", blob_id)
@@ -578,7 +613,7 @@ impl Client {
     pub async fn fetch_blob(&self, token: &str, blob_id: &str) -> Result<Option<Vec<u8>>, String> {
         let response = self
             .http
-            .get(format!("{}/v1/blobs/{blob_id}", self.base))
+            .get(self.endpoint(&["v1", "blobs", blob_id])?)
             .bearer_auth(token)
             .send()
             .await
@@ -598,7 +633,7 @@ impl Client {
     pub async fn export_account(&self, token: &str) -> Result<serde_json::Value, String> {
         let response = self
             .http
-            .get(format!("{}/v1/account/export", self.base))
+            .get(self.endpoint(&["v1", "account", "export"])?)
             .bearer_auth(token)
             .send()
             .await
@@ -614,7 +649,7 @@ impl Client {
     pub async fn delete_account(&self, token: &str, password: &str) -> Result<(), String> {
         let response = self
             .http
-            .delete(format!("{}/v1/account", self.base))
+            .delete(self.endpoint(&["v1", "account"])?)
             .bearer_auth(token)
             .json(&serde_json::json!({ "password": password }))
             .send()

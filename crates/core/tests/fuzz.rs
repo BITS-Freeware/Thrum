@@ -222,17 +222,27 @@ fn fuzz_server_frames_never_panic() {
 
 // --------------------------------------------------------------------- MLS
 
+/// A server roster listing these devices with their keys bound.
+fn roster_of(devices: &[&DeviceCrypto]) -> thrum_core::membership::ServerRoster {
+    let mut roster = thrum_core::membership::ServerRoster::new();
+    for device in devices {
+        roster.add_device(device.identity(), Some(device.signature_key()));
+    }
+    roster
+}
+
 /// A device pair with a joined two-member group, built once and shared by
 /// the MLS fuzz tests below.
 fn setup_group() -> (DeviceCrypto, DeviceCrypto, String) {
     let alice = DeviceCrypto::generate("alice#device-1".to_string());
     let bob = DeviceCrypto::generate("bob#device-1".to_string());
+    let roster = roster_of(&[&alice, &bob]);
     alice.create_group("conv-fuzz").expect("create group");
     let (_commit, welcome) = alice
         .add_members("conv-fuzz", &[bob.new_key_package().expect("key package")])
         .expect("add member");
     let joined = bob
-        .process_welcome(&welcome.expect("welcome"))
+        .process_welcome("conv-fuzz", &welcome.expect("welcome"), &roster)
         .expect("join");
     assert_eq!(joined, "conv-fuzz");
     (alice, bob, "conv-fuzz".to_string())
@@ -242,14 +252,15 @@ fn setup_group() -> (DeviceCrypto, DeviceCrypto, String) {
 fn fuzz_mls_process_incoming_never_panics_and_state_survives() {
     let mut rng = Rng::new(0x4D_1C_00_07);
     let (alice, bob, conversation) = setup_group();
+    let roster = roster_of(&[&alice, &bob]);
     let valid = alice
         .encrypt(&conversation, b"a real application message")
         .expect("encrypt");
 
     for _ in 0..MLS_ITERS {
         let raw = rng.mutate(&valid);
-        let _ = bob.process_incoming(&conversation, &raw);
-        let _ = alice.process_incoming(&conversation, &rng.random_vec(64));
+        let _ = bob.process_incoming(&conversation, &raw, &roster);
+        let _ = alice.process_incoming(&conversation, &rng.random_vec(64), &roster);
     }
 
     // The storm must not have corrupted the group: both devices still
@@ -258,7 +269,7 @@ fn fuzz_mls_process_incoming_never_panics_and_state_survives() {
         .encrypt(&conversation, b"still working")
         .expect("encrypt after fuzzing");
     match bob
-        .process_incoming(&conversation, &wire)
+        .process_incoming(&conversation, &wire, &roster)
         .expect("process a valid message after the fuzz storm")
     {
         Incoming::Application { sender, payload } => {
@@ -272,14 +283,15 @@ fn fuzz_mls_process_incoming_never_panics_and_state_survives() {
 #[test]
 fn fuzz_mls_welcome_and_key_package_never_panic() {
     let mut rng = Rng::new(0x4E_00_00_08);
-    let (alice, _bob, _conversation) = setup_group();
+    let (alice, bob, conversation) = setup_group();
     let outsider = DeviceCrypto::generate("carol#device-1".to_string());
+    let roster = roster_of(&[&alice, &bob, &outsider]);
     let key_package = alice.new_key_package().expect("key package");
 
     for _ in 0..MLS_ITERS {
         let raw = rng.mutate(&key_package);
         let _ = outsider.key_package_identity(&raw);
-        let _ = outsider.process_welcome(&raw);
-        let _ = outsider.process_welcome(&rng.random_vec(64));
+        let _ = outsider.process_welcome(&conversation, &raw, &roster);
+        let _ = outsider.process_welcome(&conversation, &rng.random_vec(64), &roster);
     }
 }

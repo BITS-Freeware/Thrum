@@ -31,6 +31,11 @@ export class LiveConnection {
     this.connect();
   }
 
+  /** Resolves once every frame received so far has been handled. */
+  idle(): Promise<void> {
+    return this.processing;
+  }
+
   stop(): void {
     this.closed = true;
     this.socket?.close();

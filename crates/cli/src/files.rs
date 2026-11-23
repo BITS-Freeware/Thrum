@@ -74,24 +74,70 @@ fn recompress_image(bytes: &[u8]) -> Option<Vec<u8>> {
         .map(|_| out.into_inner())
 }
 
-/// Save received bytes under `dir` with a collision-free variant of `name`.
+/// Save received bytes under `dir` with a collision-free variant of `name`,
+/// readable by the owner only, in a directory only the owner can open.
 /// Returns the path that was written.
 pub fn save_attachment(dir: &Path, name: &str, bytes: &[u8]) -> Result<PathBuf, String> {
-    std::fs::create_dir_all(dir).map_err(|error| format!("cannot create {dir:?}: {error}"))?;
+    private_dir(dir)?;
     let name = sanitize_name(name);
     let (stem, extension) = split_name(&name);
-    let mut candidate = dir.join(&name);
     let mut counter = 1;
-    while candidate.exists() {
-        counter += 1;
-        candidate = dir.join(match extension.as_deref() {
-            Some(extension) => format!("{stem}-{counter}.{extension}"),
-            None => format!("{stem}-{counter}"),
-        });
+    let mut candidate = dir.join(&name);
+    loop {
+        match create_private(&candidate) {
+            Ok(mut file) => {
+                use std::io::Write;
+                file.write_all(bytes)
+                    .and_then(|()| file.sync_all())
+                    .map_err(|error| format!("cannot write {}: {error}", candidate.display()))?;
+                return Ok(candidate);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                counter += 1;
+                candidate = dir.join(match extension.as_deref() {
+                    Some(extension) => format!("{stem}-{counter}.{extension}"),
+                    None => format!("{stem}-{counter}"),
+                });
+            }
+            Err(error) => {
+                return Err(format!("cannot write {}: {error}", candidate.display()));
+            }
+        }
     }
-    std::fs::write(&candidate, bytes)
-        .map_err(|error| format!("cannot write {}: {error}", candidate.display()))?;
-    Ok(candidate)
+}
+
+/// Create `dir` (and its parents) if needed; the directory itself is
+/// made owner-only.
+pub fn private_dir(dir: &Path) -> Result<(), String> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder
+        .create(dir)
+        .map_err(|error| format!("cannot create {dir:?}: {error}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|error| format!("cannot protect {dir:?}: {error}"))?;
+    }
+    Ok(())
+}
+
+/// Create a new file that only the owner can read, failing if it exists.
+fn create_private(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
 }
 
 /// Strip anything that could escape the attachments directory: only the

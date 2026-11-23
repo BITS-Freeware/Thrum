@@ -6,6 +6,7 @@
 
 pub mod attachment;
 pub mod envelope;
+pub mod membership;
 pub mod mls;
 pub mod protocol;
 pub mod roster;

@@ -122,10 +122,23 @@ export class Api {
   }
 
   async activeDevices(username: string): Promise<string[]> {
-    const body = await this.expectJson<{ devices: string[] }>(
-      await this.call("GET", `/v1/users/${encodeURIComponent(username)}/devices`),
-    );
-    return body.devices ?? [];
+    return Object.keys(await this.activeDevicesWithKeys(username));
+  }
+
+  /**
+   * The account's active device ids, each with the signature key the
+   * server bound to it (base64), or null while the device has not uploaded
+   * a key package yet.
+   */
+  async activeDevicesWithKeys(username: string): Promise<Record<string, string | null>> {
+    const body = await this.expectJson<{
+      devices: string[];
+      signature_keys?: Record<string, string | null>;
+    }>(await this.call("GET", `/v1/users/${encodeURIComponent(username)}/devices`));
+    const keys = body.signature_keys ?? {};
+    const devices: Record<string, string | null> = {};
+    for (const device of body.devices ?? []) devices[device] = keys[device] ?? null;
+    return devices;
   }
 
   async serverInfo(): Promise<{ sourceUrl: string }> {

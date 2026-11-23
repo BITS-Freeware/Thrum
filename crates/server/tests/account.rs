@@ -3,6 +3,7 @@
 mod common;
 
 use common::{TestApp, login, register};
+use serde_json::{Value, json};
 
 async fn two_users(app: &TestApp) -> (String, String) {
     register(app, "alice", "correct horse battery").await;
@@ -168,4 +169,33 @@ async fn delete_account_transfers_ownership() {
     assert_eq!(convs.len(), 1);
     assert_eq!(convs[0]["id"], conv_id);
     assert_eq!(convs[0]["admin"], "bob");
+}
+
+/// A deleted account's name cannot be registered again, in any case, so
+/// nobody inherits the trust other users placed in it.
+#[tokio::test]
+async fn a_deleted_name_stays_retired() {
+    let app = TestApp::spawn().await;
+    register(&app, "alice", "long enough password").await;
+    let alice = login(&app, "alice", "long enough password", "laptop").await;
+    let deleted = app
+        .client
+        .delete(app.url("/v1/account"))
+        .bearer_auth(alice["token"].as_str().unwrap())
+        .json(&json!({ "password": "long enough password" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), 204);
+    for name in ["alice", "Alice"] {
+        let again = app
+            .post_json(
+                "/v1/accounts",
+                &json!({ "username": name, "password": "mallory's password" }),
+            )
+            .await;
+        assert_eq!(again.status(), 409, "{name}");
+        let body: Value = again.json().await.unwrap();
+        assert_eq!(body["error"], "username_taken");
+    }
 }

@@ -14,6 +14,10 @@ services:
       # uncomment:
       # THRUM_DB: postgres://thrum:thrum@postgres:5432/thrum
       THRUM_BLOB_BACKEND: disk
+      # Behind a host proxy that overwrites X-Forwarded-For, trust the
+      # Docker network so rate limits see real client addresses (see
+      # docs/self-hosting.md, "TLS and reverse proxy"):
+      # THRUM_TRUSTED_PROXIES: 172.16.0.0/12
     restart: unless-stopped
 
   # Optional: `docker compose --profile postgres up -d` switches the

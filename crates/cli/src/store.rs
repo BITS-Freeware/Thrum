@@ -53,6 +53,11 @@ pub struct Store {
     /// considered. A device that appears after that stays pending.
     #[serde(default)]
     known_accounts: BTreeMap<String, BTreeSet<String>>,
+    /// Device identity → the signature key (base64) this client first saw
+    /// it with. A later leaf or key package under the same identity must
+    /// carry the same key.
+    #[serde(default)]
+    pinned_keys: BTreeMap<String, String>,
     #[serde(skip)]
     path: Option<PathBuf>,
 }
@@ -64,19 +69,29 @@ impl Store {
     }
 
     /// Load the store from `<state-file>.messages.json` when it exists.
-    pub fn load(state_file: &Path) -> Self {
+    ///
+    /// A file that cannot be read or parsed is an error, and is left as it
+    /// is: starting empty would silently forget which devices this user
+    /// trusts, and the next save would overwrite the evidence.
+    pub fn load(state_file: &Path) -> Result<Self, String> {
         let path = store_path(state_file);
         match std::fs::read(&path) {
             Ok(bytes) => {
-                let mut store: Store = serde_json::from_slice(&bytes).unwrap_or_default();
+                let mut store: Store = serde_json::from_slice(&bytes).map_err(|error| {
+                    format!(
+                        "{} is damaged ({error}); move it aside to start over, which \
+                         forgets this device's history and trust decisions",
+                        path.display()
+                    )
+                })?;
                 store.path = Some(path);
-                store
+                Ok(store)
             }
-            Err(_) => Self {
-                conversations: BTreeMap::new(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self {
                 path: Some(path),
                 ..Self::default()
-            },
+            }),
+            Err(error) => Err(format!("cannot read {}: {error}", path.display())),
         }
     }
 
@@ -244,6 +259,62 @@ impl Store {
         self.save();
     }
 
+    /// Stop trusting a device identity, for example once the server no
+    /// longer lists it: if it comes back, it waits for the user again.
+    pub fn untrust(&mut self, identity: &str) {
+        if self.trusted_devices.remove(identity) {
+            self.save();
+        }
+    }
+
+    /// Trust `identity` with whatever key it presents next, replacing the
+    /// key pinned for it. This is the user's explicit decision.
+    pub fn trust_new_key(&mut self, identity: &str) {
+        self.pinned_keys.remove(identity);
+        self.trust(identity);
+    }
+
+    /// The signature key pinned for a device identity.
+    pub fn pinned_key(&self, identity: &str) -> Option<Vec<u8>> {
+        use base64::Engine as _;
+        self.pinned_keys
+            .get(identity)
+            .and_then(|key| base64::engine::general_purpose::STANDARD.decode(key).ok())
+    }
+
+    /// Every pinned identity with its key.
+    pub fn pinned_keys(&self) -> Vec<(String, Vec<u8>)> {
+        self.pinned_keys
+            .keys()
+            .filter_map(|identity| Some((identity.clone(), self.pinned_key(identity)?)))
+            .collect()
+    }
+
+    /// Pin the key of each identity that has none yet. Returns the
+    /// identities whose presented key differs from the pinned one.
+    pub fn pin_keys(&mut self, leaves: &[(String, Vec<u8>)]) -> Vec<String> {
+        use base64::Engine as _;
+        let mut changed = Vec::new();
+        let mut added = false;
+        for (identity, key) in leaves {
+            match self.pinned_key(identity) {
+                Some(pinned) if &pinned != key => changed.push(identity.clone()),
+                Some(_) => {}
+                None => {
+                    self.pinned_keys.insert(
+                        identity.clone(),
+                        base64::engine::general_purpose::STANDARD.encode(key),
+                    );
+                    added = true;
+                }
+            }
+        }
+        if added {
+            self.save();
+        }
+        changed
+    }
+
     /// Device identities this user has agreed to add.
     pub fn trusted(&self) -> BTreeSet<String> {
         self.trusted_devices.clone()
@@ -254,6 +325,15 @@ impl Store {
         self.known_accounts
             .get(conversation_id)
             .is_some_and(|names| names.iter().any(|name| name.eq_ignore_ascii_case(username)))
+    }
+
+    /// Whether this client has already introduced `username` in any
+    /// conversation. Trust on first use is per account: a new conversation
+    /// with a known account does not admit its new devices unasked.
+    pub fn knows_account_anywhere(&self, username: &str) -> bool {
+        self.known_accounts
+            .values()
+            .any(|names| names.iter().any(|name| name.eq_ignore_ascii_case(username)))
     }
 
     /// Remember that `username` has been seen in this conversation.
@@ -288,18 +368,24 @@ impl Store {
             .collect()
     }
 
-    /// Persist to disk; failures are swallowed, the store is a cache.
+    /// Persist to disk, atomically and readable by the owner only. The
+    /// store is the only record of history and trust, so a failure is
+    /// reported rather than swallowed.
     fn save(&self) {
-        if let Some(path) = &self.path
-            && let Ok(bytes) = serde_json::to_vec(self)
-        {
-            let _ = std::fs::write(path, bytes);
+        let Some(path) = &self.path else { return };
+        let result = serde_json::to_vec(self)
+            .map_err(|error| error.to_string())
+            .and_then(|bytes| {
+                thrum_core::mls::write_private_file(path, &bytes).map_err(|e| e.to_string())
+            });
+        if let Err(error) = result {
+            crate::errln!("warning: could not save {}: {error}", path.display());
         }
     }
 }
 
 /// The store file lives next to the session state file.
-fn store_path(state_file: &Path) -> PathBuf {
+pub(crate) fn store_path(state_file: &Path) -> PathBuf {
     let mut name = state_file.as_os_str().to_os_string();
     name.push(".messages.json");
     PathBuf::from(name)
@@ -308,6 +394,74 @@ fn store_path(state_file: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_damaged_store_is_refused_and_left_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state.json");
+        let mut store = Store::load(&state).unwrap();
+        store.trust("alice#phone");
+        store.mark_known("c1", "alice");
+        let path = store_path(&state);
+        let bytes = std::fs::read(&path).unwrap();
+        std::fs::write(&path, &bytes[..bytes.len() / 2]).unwrap();
+        let error = Store::load(&state).expect_err("a damaged store must not load");
+        assert!(error.contains("damaged"), "{error}");
+        assert_eq!(std::fs::read(&path).unwrap(), &bytes[..bytes.len() / 2]);
+    }
+
+    #[test]
+    fn saves_replace_the_file_whole_and_privately() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state.json");
+        let mut store = Store::load(&state).unwrap();
+        for n in 0..20 {
+            store.record("c1", &format!("m{n}"), "alice", "hello");
+        }
+        let loaded = Store::load(&state).unwrap();
+        assert_eq!(loaded.entry("c1", "m19").unwrap().text, "hello");
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            ["state.json.messages.json"],
+            "no temporary files left"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(store_path(&state))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+    }
+
+    #[test]
+    fn accounts_are_known_across_conversations_and_keys_stay_pinned() {
+        let mut store = Store::new();
+        store.mark_known("c1", "Bob");
+        assert!(store.knows_account_anywhere("bob"));
+        assert!(!store.knows_account_anywhere("carol"));
+
+        let key = vec![1u8; 32];
+        assert!(
+            store
+                .pin_keys(&[("bob#phone".into(), key.clone())])
+                .is_empty()
+        );
+        let changed = store.pin_keys(&[("bob#phone".into(), vec![2u8; 32])]);
+        assert_eq!(changed, ["bob#phone"]);
+        assert_eq!(store.pinned_key("bob#phone"), Some(key));
+        store.trust_new_key("bob#phone");
+        assert!(store.pinned_key("bob#phone").is_none());
+        assert!(store.trusted().contains("bob#phone"));
+        store.untrust("bob#phone");
+        assert!(!store.trusted().contains("bob#phone"));
+    }
 
     #[test]
     fn edits_and_deletes_only_by_the_sender() {

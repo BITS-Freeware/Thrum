@@ -29,6 +29,24 @@ fn migrations(backend: Backend) -> sqlx::migrate::Migrator {
     }
 }
 
+/// Create a missing SQLite database file readable by its owner only. SQLite
+/// gives the `-wal` and `-shm` files it creates the database file's mode,
+/// so they stay private too. An existing file keeps the mode it has.
+fn create_private_database(path: &std::path::Path) -> std::io::Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    match options.open(path) {
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 /// Open (or create) the database described by `url` and apply migrations.
 ///
 /// A plain path is a SQLite file; `postgres://` selects PostgreSQL.
@@ -72,6 +90,9 @@ pub async fn connect(url: &str) -> sqlx::Result<(AnyPool, Backend)> {
                 .add(b'`')
                 .add(b'{')
                 .add(b'}');
+            if query.is_none_or(|query| !query.contains("mode=")) {
+                create_private_database(&absolute).map_err(sqlx::Error::Io)?;
+            }
             let path_text = absolute.to_string_lossy().into_owned();
             let encoded = percent_encoding::utf8_percent_encode(&path_text, PATH);
             match query {

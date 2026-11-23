@@ -71,9 +71,17 @@ pub struct DiskStore {
 
 impl DiskStore {
     /// Create a disk store in `dir`, creating the directory if needed.
+    /// A directory it creates is owner-only, and so is every blob file.
     pub fn new(dir: &str) -> io::Result<Self> {
         let dir = PathBuf::from(dir);
-        std::fs::create_dir_all(&dir)?;
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(&dir)?;
         Ok(Self { dir })
     }
 
@@ -88,7 +96,14 @@ impl DiskStore {
 #[async_trait]
 impl BlobStore for DiskStore {
     async fn put(&self, id: &str, data: &[u8]) -> Result<(), BlobError> {
-        tokio::fs::write(self.path(id), data).await?;
+        use tokio::io::AsyncWriteExt;
+        let mut options = tokio::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options.open(self.path(id)).await?;
+        file.write_all(data).await?;
+        file.flush().await?;
         Ok(())
     }
 

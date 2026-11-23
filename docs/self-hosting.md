@@ -71,7 +71,11 @@ THRUM_WEB_DIR=web/dist \
 ./target/release/thrum-server
 ```
 
-The server creates the SQLite file if it is missing. With
+The server creates the SQLite file if it is missing, readable by its own
+user only, and the blob directory and every blob the same way. A database
+or blob directory from an older version keeps its mode; tighten it with
+`chmod 600 thrum.sqlite* && chmod -R go-rwx blobs`. The container image
+does this for `/data` at every start. With
 `THRUM_WEB_DIR` set, `http://localhost:8080/` serves the web client;
 without it, only the API is available (the web client can be hosted
 anywhere static files are served, but it must share the server's origin,
@@ -100,15 +104,20 @@ back to the default shown.
 | `THRUM_S3_SECRET_ACCESS_KEY` | unset | Secret access key |
 | `THRUM_REGISTER_PER_MINUTE` | `20` | Registrations per client address per minute |
 | `THRUM_LOGIN_PER_MINUTE` | `60` | Login attempts per client address per minute |
-| `THRUM_LOGIN_PER_ACCOUNT_PER_MINUTE` | `10` | Login attempts per account per minute |
-| `THRUM_LOGIN_FAILURES_BEFORE_BACKOFF` | `5` | Failed passwords before the account delay starts |
-| `THRUM_LOGIN_BACKOFF_BASE_SECONDS` | `30` | First account delay; it doubles after each further failure |
-| `THRUM_LOGIN_BACKOFF_CAP_SECONDS` | `900` | Longest account delay |
+| `THRUM_LOGIN_PER_ACCOUNT_PER_MINUTE` | `10` | Login attempts per account per client address per minute |
+| `THRUM_LOGIN_FAILURES_BEFORE_BACKOFF` | `5` | Failed passwords from one address before that address's delay for the account starts |
+| `THRUM_LOGIN_BACKOFF_BASE_SECONDS` | `30` | First delay; it doubles after each further failure |
+| `THRUM_LOGIN_BACKOFF_CAP_SECONDS` | `900` | Longest delay |
+| `THRUM_LOGIN_FAILURES_PER_ACCOUNT_PER_HOUR` | `100` | Failed passwords against one account per hour, from any address, before every address is refused for the rest of the hour (`0` is no ceiling). Wrong passwords on account deletion count too |
 | `THRUM_TRUSTED_PROXIES` | empty | Comma-separated CIDRs. `X-Forwarded-For` and `Forwarded` are read only when the immediate peer is in this list; the client address is the rightmost address that is not |
 | `THRUM_KEY_PACKAGE_FETCH_PER_CALLER_PER_MINUTE` | `120` | Key-package fetches per logged-in user per minute |
-| `THRUM_KEY_PACKAGE_FETCH_PER_DEVICE_PER_MINUTE` | `60` | Key-package fetches per target device per minute |
+| `THRUM_KEY_PACKAGE_FETCH_PER_CALLER_DEVICE_PER_MINUTE` | `10` | Key-package fetches of one device by one user per minute |
+| `THRUM_KEY_PACKAGE_FETCH_PER_DEVICE_PER_MINUTE` | `60` | Key-package fetches of one device per minute, from everyone together. Past this, fetches get the device's last-resort package and its one-time stock is left alone |
 | `THRUM_KEY_PACKAGE_MAX_PER_DEVICE` | `100` | One-time key packages stored per device (`0` is unlimited). One last-resort package is extra and is not deleted |
-| `THRUM_MAX_GROUP_MEMBERS` | `50` | Members per conversation, including the creator (`0` is unlimited) |
+| `THRUM_MAX_GROUP_MEMBERS` | `50` | Members per conversation, including the creator (`0` is unlimited). Holds for creating, adding and invites |
+| `THRUM_MAX_DEVICES_PER_ACCOUNT` | `20` | Signed-in devices per account (`0` is unlimited). Login answers `409 too_many_devices` at the cap; logging out or revoking a device makes room |
+| `THRUM_MESSAGES_PER_DEVICE_PER_MINUTE` | `120` | Messages one device may send per minute |
+| `THRUM_QUEUED_BYTES_PER_ACCOUNT` | `104857600` | Bytes of an account's sent messages that some device has not received yet (100 MiB, `0` is unlimited). A send past it answers `429 queue_full` until devices catch up or the queue expires |
 | `THRUM_SOURCE_URL` | the Thrum repository | Link the web client shows for this server's source (AGPL) |
 
 New invites expire after 7 days and can be redeemed once. A create
@@ -168,8 +177,19 @@ location / {
     proxy_set_header Upgrade $http_upgrade;
     proxy_set_header Connection "upgrade";
     proxy_set_header Host $host;
+    # Replace, never append: a client must not choose its own address.
+    proxy_set_header X-Forwarded-For $remote_addr;
 }
 ```
+
+Rate limits follow the client address, so the server must know it. Set
+`THRUM_TRUSTED_PROXIES` to the address the proxy connects from, and make
+sure the proxy overwrites `X-Forwarded-For` as above (Caddy's
+`reverse_proxy` does this by itself). Without it, every client shares the
+proxy's address and one client's failed logins lock out everyone. With the
+Compose file, the server sees the Docker network's gateway, not
+`127.0.0.1`: use that network's subnet, which `docker network inspect`
+shows (often inside `172.16.0.0/12`).
 
 The same proxy can also serve the web client's static files itself
 instead of `THRUM_WEB_DIR`; both work, because the client always talks

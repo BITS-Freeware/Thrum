@@ -1,7 +1,8 @@
 # Status
 
-Thrum 0.2.0 is the current version on `main` once this release is tagged.
-0.1.0 remains the previous tagged release.
+Thrum 0.2.1 is the current version on `main` once this release is tagged.
+It is a security release on top of 0.2.0; see `CHANGELOG.md` and the
+repository's security advisories.
 
 The server, CLI, and web client speak the same protocol. Self-hosting
 defaults bind to loopback, the container runs as a dedicated user, and the

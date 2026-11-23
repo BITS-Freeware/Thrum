@@ -14,7 +14,7 @@ use thrum_core::UserName;
 use crate::auth;
 use crate::error::ApiError;
 use crate::routes::conversations::{
-    blocked_between, conversation_info, group_too_large, require_admin,
+    blocked_among, conversation_info, group_too_large, lock_conversation, member_ids, require_admin,
 };
 use crate::state::AppState;
 
@@ -25,7 +25,9 @@ pub struct AddMembersBody {
 }
 
 /// `POST /v1/conversations/{conversation_id}/members`: add users to the
-/// conversation. Admin only; blocked relationships refuse the add.
+/// conversation. Admin only; a block between a newcomer and anyone in the
+/// group refuses the add. Adding someone the admin removed earlier lifts
+/// that removal.
 pub async fn add_members(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -45,35 +47,41 @@ pub async fn add_members(
                 .await?
                 .map(|(id,)| id)
                 .ok_or_else(|| ApiError::bad_request("unknown_member"))?;
-        blocked_between(&state, authed.user_id, id).await?;
         if !added.contains(&id) {
             added.push(id);
         }
     }
+    let current_ids = member_ids(&state, &conversation_id).await?;
+    let newcomers: Vec<i64> = added
+        .iter()
+        .copied()
+        .filter(|id| !current_ids.contains(id))
+        .collect();
+    blocked_among(&state, &newcomers, &current_ids).await?;
 
-    let (current,): (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM conversation_members WHERE conversation_id = $1")
+    // Count and insert under the conversation's lock, so overlapping adds
+    // and redemptions cannot pass the cap together.
+    let mut tx = state.db.begin().await?;
+    if !lock_conversation(&mut tx, &conversation_id).await? {
+        return Err(ApiError::not_found());
+    }
+    let current: Vec<i64> =
+        sqlx::query_scalar("SELECT user_id FROM conversation_members WHERE conversation_id = $1")
             .bind(&conversation_id)
-            .fetch_one(&state.db)
+            .fetch_all(&mut *tx)
             .await?;
-    let mut extra = 0usize;
-    for user_id in &added {
-        let already = sqlx::query_as::<_, (i64,)>(
-            "SELECT 1 FROM conversation_members WHERE conversation_id = $1 AND user_id = $2",
+    let extra = added.iter().filter(|id| !current.contains(id)).count();
+    if group_too_large(state.cfg.max_group_members, current.len() + extra) {
+        return Err(ApiError::bad_request("group_too_large"));
+    }
+    for user_id in added {
+        sqlx::query(
+            "DELETE FROM conversation_removals WHERE conversation_id = $1 AND user_id = $2",
         )
         .bind(&conversation_id)
         .bind(user_id)
-        .fetch_optional(&state.db)
+        .execute(&mut *tx)
         .await?;
-        if already.is_none() {
-            extra += 1;
-        }
-    }
-    if group_too_large(state.cfg.max_group_members, current as usize + extra) {
-        return Err(ApiError::bad_request("group_too_large"));
-    }
-
-    for user_id in added {
         sqlx::query(
             "INSERT INTO conversation_members (conversation_id, user_id, joined_at)
              VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
@@ -81,9 +89,10 @@ pub async fn add_members(
         .bind(&conversation_id)
         .bind(user_id)
         .bind(crate::accounts::now())
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?;
     }
+    tx.commit().await?;
 
     let info = conversation_info(&state, &conversation_id).await?;
     Ok((StatusCode::OK, Json(info)).into_response())
@@ -123,5 +132,16 @@ pub async fn remove_member(
     if removed == 0 {
         return Err(ApiError::not_found());
     }
+    // Remember the removal, so an invite cannot undo it; only the admin
+    // adding them again does.
+    sqlx::query(
+        "INSERT INTO conversation_removals (conversation_id, user_id, removed_at)
+         VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+    )
+    .bind(&conversation_id)
+    .bind(user_id)
+    .bind(crate::accounts::now())
+    .execute(&state.db)
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }

@@ -28,4 +28,5 @@ url.workspace = true
 
 [dev-dependencies]
 thrum-server.workspace = true
+sqlx.workspace = true
 tempfile.workspace = true

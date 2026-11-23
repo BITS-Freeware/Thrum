@@ -65,7 +65,20 @@ fn dummy_hash() -> &'static str {
 /// Insert a user with the given canonical name and password.
 /// Fails with `username_taken` when the name is already in use.
 pub async fn create_user(db: &AnyPool, name: &UserName, password: &str) -> Result<i64, ApiError> {
-    let password_hash = hash_password(password)?;
+    let password = password.to_string();
+    let password_hash = tokio::task::spawn_blocking(move || hash_password(&password))
+        .await
+        .map_err(|_| ApiError::internal())??;
+    // A deleted account's name stays retired. The answer is the same as for
+    // a name in use, so it does not tell anyone that an account was deleted.
+    let retired: Option<String> =
+        sqlx::query_scalar("SELECT username FROM retired_usernames WHERE username = $1")
+            .bind(name.as_str())
+            .fetch_optional(db)
+            .await?;
+    if retired.is_some() {
+        return Err(ApiError::conflict("username_taken"));
+    }
     let result = sqlx::query_scalar::<_, i64>(
         "INSERT INTO users (username, password_hash, created_at) VALUES ($1, $2, $3) RETURNING id",
     )
@@ -89,6 +102,19 @@ pub async fn create_user(db: &AnyPool, name: &UserName, password: &str) -> Resul
     }
 }
 
+/// Check a password against a stored PHC hash string, off the async
+/// workers: an Argon2 run takes long enough to stall other requests.
+pub async fn check_password(password: &str, stored: &str) -> Result<(), ApiError> {
+    let password = password.to_string();
+    let stored = stored.to_string();
+    tokio::task::spawn_blocking(move || {
+        let parsed = PasswordHash::new(&stored).map_err(|_| ApiError::internal())?;
+        verify_password(&password, &parsed)
+    })
+    .await
+    .map_err(|_| ApiError::internal())?
+}
+
 /// Check a password against a stored PHC hash string.
 fn verify_password(password: &str, stored: &PasswordHash<'_>) -> Result<(), ApiError> {
     Argon2::default()
@@ -101,19 +127,42 @@ pub async fn create_device(
     db: &AnyPool,
     user_id: i64,
     label: &str,
+    max_devices: u32,
 ) -> Result<(String, String), ApiError> {
     let device_id = Uuid::new_v4().to_string();
     let token = auth::new_session_token();
+    // Count and insert under a lock on the account row, so parallel logins
+    // cannot pass the device cap together.
+    let mut tx = db.begin().await?;
+    sqlx::query("UPDATE users SET created_at = created_at WHERE id = $1")
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+    if max_devices > 0 {
+        let active: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM devices WHERE user_id = $1 AND revoked_at IS NULL",
+        )
+        .bind(user_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if active >= i64::from(max_devices) {
+            return Err(ApiError::conflict("too_many_devices"));
+        }
+    }
     sqlx::query("INSERT INTO devices (id, user_id, label, token_hash, created_at) VALUES ($1, $2, $3, $4, $5)")
         .bind(&device_id)
         .bind(user_id)
         .bind(label)
         .bind(auth::token_hash(&token))
         .bind(now())
-        .execute(db)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
     Ok((device_id, token))
 }
+
+/// Longest device label a server accepts, in bytes.
+pub const MAX_DEVICE_LABEL_BYTES: usize = 64;
 
 /// The session created by a successful login.
 #[derive(Debug, serde::Serialize)]
@@ -123,7 +172,8 @@ pub struct Session {
     pub username: String,
 }
 
-/// Verify credentials and start a new device session.
+/// Verify credentials and start a new device session, unless the account
+/// already has `max_devices` signed-in devices (zero means no cap).
 ///
 /// Unknown names and wrong passwords return the same error and take the
 /// same time, so logins do not reveal whether an account exists.
@@ -132,7 +182,11 @@ pub async fn login(
     username: &str,
     password: &str,
     device_label: &str,
+    max_devices: u32,
 ) -> Result<Session, ApiError> {
+    if device_label.len() > MAX_DEVICE_LABEL_BYTES {
+        return Err(ApiError::bad_request("device_label_too_long"));
+    }
     let invalid = || ApiError::unauthorized("invalid_credentials");
     let name = UserName::new(username).map_err(|_| invalid())?;
     let row = sqlx::query_as::<_, (i64, String)>(
@@ -142,13 +196,11 @@ pub async fn login(
     .fetch_optional(db)
     .await?;
     let Some((user_id, stored)) = row else {
-        let parsed = PasswordHash::new(dummy_hash()).map_err(|_| ApiError::internal())?;
-        let _ = verify_password(password, &parsed);
+        let _ = check_password(password, dummy_hash()).await;
         return Err(invalid());
     };
-    let parsed = PasswordHash::new(&stored).map_err(|_| ApiError::internal())?;
-    verify_password(password, &parsed)?;
-    let (device_id, token) = create_device(db, user_id, device_label).await?;
+    check_password(password, &stored).await?;
+    let (device_id, token) = create_device(db, user_id, device_label, max_devices).await?;
     Ok(Session {
         token,
         device_id,

@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{TestApp, login, register};
+use common::{TestApp, key_package, login, register};
 use serde_json::{Value, json};
 
 const PW: &str = "long enough password";
@@ -246,7 +246,7 @@ async fn key_package_count_tracks_uploads_and_fetches() {
             .client
             .post(app.url("/v1/key-packages"))
             .bearer_auth(alice_token)
-            .body(format!("kp-{i}-{}", "x".repeat(16)))
+            .body(key_package(&alice))
             .send()
             .await
             .unwrap();
@@ -290,7 +290,7 @@ async fn key_package_devices_lists_only_devices_with_stock() {
     app.client
         .post(app.url("/v1/key-packages"))
         .bearer_auth(alice["token"].as_str().unwrap())
-        .body("kp")
+        .body(key_package(&alice))
         .send()
         .await
         .unwrap();

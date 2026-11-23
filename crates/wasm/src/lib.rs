@@ -11,6 +11,7 @@ use serde_wasm_bindgen::to_value;
 use thrum_core as core;
 use thrum_core::attachment::{FileKey, decrypt_file, encrypt_file};
 use thrum_core::envelope::AppMessage;
+use thrum_core::membership::ServerRoster;
 use thrum_core::mls::{DeviceCrypto, Incoming};
 use thrum_core::protocol::{decode_payload, encode_payload};
 use wasm_bindgen::prelude::*;
@@ -34,6 +35,29 @@ fn object(entries: &[(&str, JsValue)]) -> Result<JsValue, JsValue> {
         js_sys::Reflect::set(&object, &(*key).into(), value)?;
     }
     Ok(object.into())
+}
+
+/// Parse the server's view of a conversation from JSON:
+/// `{ "<username>": { "<device id>": "<base64 signature key>" | null } }`,
+/// one entry per member account with its active devices.
+fn roster(json: &str) -> Result<ServerRoster, JsValue> {
+    use base64::Engine as _;
+    use std::collections::BTreeMap;
+    let accounts: BTreeMap<String, BTreeMap<String, Option<String>>> =
+        serde_json::from_str(json).map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let mut roster = ServerRoster::new();
+    for (username, devices) in accounts {
+        let mut keys = Vec::new();
+        for (device_id, key) in devices {
+            let key = key
+                .map(|key| base64::engine::general_purpose::STANDARD.decode(key))
+                .transpose()
+                .map_err(|error| JsValue::from_str(&error.to_string()))?;
+            keys.push((device_id, key));
+        }
+        roster.add_account(&username, keys);
+    }
+    Ok(roster)
 }
 
 /// A device's MLS state. Create with [`new_device`] or
@@ -85,6 +109,26 @@ impl DeviceState {
         self.inner
             .key_package_identity(&bytes(package))
             .map_err(js_error)
+    }
+
+    /// Check a key package fetched for `identity` before adding it: it must
+    /// claim that identity and carry the signature key the server bound to
+    /// the device. `roster` is the JSON described at [`roster`]. Throws with
+    /// the reason when the package must not be added.
+    pub fn check_key_package(
+        &self,
+        package: Uint8Array,
+        identity: &str,
+        roster_json: &str,
+    ) -> Result<(), JsValue> {
+        self.inner
+            .check_key_package(&bytes(package), identity, &roster(roster_json)?)
+            .map_err(|reason| JsValue::from_str(&reason))
+    }
+
+    /// This device's public signature key, as the server binds it.
+    pub fn signature_key(&self) -> Uint8Array {
+        array(&self.inner.signature_key())
     }
 
     /// True when this device has joined the conversation's MLS group.
@@ -140,17 +184,20 @@ impl DeviceState {
             .map_err(js_error)
     }
 
-    /// Process one serialized MLS message. Returns
-    /// `{ kind: "application", sender, payload }`,
-    /// `{ kind: "commit" }` or `{ kind: "ignored" }`.
+    /// Process one serialized MLS message, checking commits against the
+    /// server's current roster (JSON as for [`roster`]). Returns
+    /// `{ kind: "application", sender, payload }`, `{ kind: "commit" }`,
+    /// `{ kind: "ignored" }` or `{ kind: "rejected", reason }`. A rejected
+    /// commit leaves the device unchanged; retry with a fresher roster.
     pub fn process_incoming(
         &self,
         conversation_id: &str,
         message: Uint8Array,
+        roster_json: &str,
     ) -> Result<JsValue, JsValue> {
         let incoming = self
             .inner
-            .process_incoming(conversation_id, &bytes(message))
+            .process_incoming(conversation_id, &bytes(message), &roster(roster_json)?)
             .map_err(js_error)?;
         match incoming {
             Incoming::Application { sender, payload } => object(&[
@@ -160,15 +207,42 @@ impl DeviceState {
             ]),
             Incoming::Commit => object(&[("kind", "commit".into())]),
             Incoming::Ignored => object(&[("kind", "ignored".into())]),
+            Incoming::Rejected(reason) => {
+                object(&[("kind", "rejected".into()), ("reason", reason.into())])
+            }
         }
     }
 
-    /// Process a serialized welcome: join the group. Returns the group's
-    /// conversation id.
-    pub fn process_welcome(&self, welcome: Uint8Array) -> Result<String, JsValue> {
+    /// Process a serialized welcome that arrived in `conversation_id`: join
+    /// the group if the welcome is for that conversation and every other
+    /// member is on the server's roster with its bound key. Returns the
+    /// conversation id; throws otherwise, leaving the device unchanged.
+    pub fn process_welcome(
+        &self,
+        conversation_id: &str,
+        welcome: Uint8Array,
+        roster_json: &str,
+    ) -> Result<String, JsValue> {
         self.inner
-            .process_welcome(&bytes(welcome))
+            .process_welcome(conversation_id, &bytes(welcome), &roster(roster_json)?)
             .map_err(js_error)
+    }
+
+    /// The current group leaves as `[{ identity, signatureKey }]`, the key
+    /// base64 encoded, for pinning. Leaves whose identity is not
+    /// `username#device-id` are left out.
+    pub fn group_leaves(&self, conversation_id: &str) -> Result<js_sys::Array, JsValue> {
+        use base64::Engine as _;
+        let leaves = self.inner.group_leaves(conversation_id).map_err(js_error)?;
+        let array = js_sys::Array::new();
+        for leaf in leaves.into_iter().filter(|leaf| leaf.well_formed()) {
+            let key = base64::engine::general_purpose::STANDARD.encode(&leaf.signature_key);
+            array.push(&object(&[
+                ("identity", leaf.identity.into()),
+                ("signatureKey", key.into()),
+            ])?);
+        }
+        Ok(array)
     }
 
     /// The credential identities of all current group members.
@@ -383,13 +457,12 @@ pub fn decode_envelope(payload: Uint8Array) -> Result<JsValue, JsValue> {
         Envelope::Mls { data } => ("mls", data),
         Envelope::Welcome { data } => ("welcome", data),
     };
-    object(&[
-        ("kind", (*kind).into()),
-        (
-            "data",
-            array(&decode_payload(data_base64).unwrap_or_default()).into(),
-        ),
-    ])
+    // Bad base64 inside a valid envelope is as undecodable as a bad
+    // envelope, not an empty message.
+    let Some(data) = decode_payload(data_base64) else {
+        return Ok(JsValue::NULL);
+    };
+    object(&[("kind", (*kind).into()), ("data", array(&data).into())])
 }
 
 /// Encode bytes as the base64 the relay protocol expects.

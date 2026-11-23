@@ -818,12 +818,54 @@ function startLive(): void {
       scheduleLiveRefresh();
     }
   });
+  const current = live;
+  session.beforeSend = () => current.idle();
   live.start();
 }
 
-/** Boot: restore a stored session, then render. */
+/**
+ * One tab at a time runs this browser's device. Two tabs would each ack
+ * frames the other never sees and overwrite each other's MLS state, and a
+ * tab that missed a removal would keep encrypting to the removed member.
+ * Resolves once this tab holds the lock, which it keeps until it closes;
+ * `onWaiting` runs if another tab has it first.
+ */
+function holdDeviceLock(onWaiting: () => void): Promise<void> {
+  if (!("locks" in navigator)) return Promise.resolve();
+  const forever = () => new Promise<void>(() => {});
+  return new Promise((granted) => {
+    void navigator.locks.request("thrum-device", { ifAvailable: true }, async (lock) => {
+      if (lock) {
+        granted();
+        return forever();
+      }
+      onWaiting();
+      await navigator.locks.request("thrum-device", async () => {
+        granted();
+        return forever();
+      });
+    });
+  });
+}
+
+function renderOtherTabNotice(): void {
+  screen.replaceChildren();
+  const main = document.createElement("main");
+  main.className = "auth";
+  const heading = document.createElement("h1");
+  heading.textContent = "Thrum is open in another tab";
+  const text = document.createElement("p");
+  text.textContent =
+    "This browser runs one Thrum device, in one tab at a time. Use the other tab, " +
+    "or close it and this one takes over.";
+  main.append(heading, text);
+  screen.append(main);
+}
+
+/** Boot: take the device lock, restore a stored session, then render. */
 void (async () => {
   ensureSourceLink();
+  await holdDeviceLock(renderOtherTabNotice);
   try {
     session = await CryptoSession.restore(window.location.origin);
   } catch (error) {

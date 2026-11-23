@@ -12,19 +12,29 @@ pub mod ws;
 
 use axum::Json;
 use axum::Router;
-use axum::extract::State;
+use axum::extract::{DefaultBodyLimit, State};
 use axum::routing::{delete, get, patch, post};
 use serde_json::json;
 
 use crate::state::AppState;
+
+/// Largest register or login body. Names are at most 32 bytes and labels
+/// short, so anything bigger is refused before it reaches a limiter.
+const AUTH_BODY_LIMIT: usize = 16 * 1024;
 
 /// All application routes, bound to `state`.
 pub fn routes(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/v1/meta", get(meta))
-        .route("/v1/accounts", post(accounts::register))
-        .route("/v1/sessions", post(accounts::login))
+        .route(
+            "/v1/accounts",
+            post(accounts::register).layer(DefaultBodyLimit::max(AUTH_BODY_LIMIT)),
+        )
+        .route(
+            "/v1/sessions",
+            post(accounts::login).layer(DefaultBodyLimit::max(AUTH_BODY_LIMIT)),
+        )
         .route("/v1/sessions/current", delete(accounts::logout))
         .route("/v1/account/export", get(accounts::export))
         .route("/v1/account", delete(accounts::delete_account))

@@ -19,10 +19,12 @@ pub fn load(path: &Path) -> Result<Session, String> {
     serde_json::from_str(&text).map_err(|error| format!("corrupt state file: {error}"))
 }
 
-/// Save the session to `path`.
+/// Save the session to `path`, readable by the owner only: it holds the
+/// device's bearer token.
 pub fn save(path: &Path, session: &Session) -> Result<(), String> {
     let text = serde_json::to_string_pretty(session).expect("session serializes");
-    std::fs::write(path, text).map_err(|error| format!("cannot write {}: {error}", path.display()))
+    thrum_core::mls::write_private_file(path, text.as_bytes())
+        .map_err(|error| format!("cannot write {}: {error}", path.display()))
 }
 
 /// Load the session and require it to belong to `server`.

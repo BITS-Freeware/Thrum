@@ -1,6 +1,6 @@
 mod common;
 
-use common::{TestApp, login, register};
+use common::{TestApp, key_package, last_resort_package, login, register};
 
 #[tokio::test]
 async fn upload_and_fetch_key_packages() {
@@ -11,7 +11,8 @@ async fn upload_and_fetch_key_packages() {
     let device_id = alice["device_id"].as_str().expect("device id").to_string();
 
     // Upload two key packages for alice's device.
-    for content in [b"key package one".to_vec(), b"key package two".to_vec()] {
+    let uploaded = [key_package(&alice), key_package(&alice)];
+    for content in uploaded.clone() {
         let response = app
             .client
             .post(app.url("/v1/key-packages"))
@@ -36,7 +37,7 @@ async fn upload_and_fetch_key_packages() {
         .await;
     assert_eq!(response.status(), 200);
     let bytes = response.bytes().await.expect("key package");
-    assert_eq!(&bytes[..], b"key package one");
+    assert_eq!(&bytes[..], &uploaded[0][..]);
 
     let response = app
         .get(
@@ -46,7 +47,7 @@ async fn upload_and_fetch_key_packages() {
         .await;
     assert_eq!(response.status(), 200);
     let bytes = response.bytes().await.expect("key package");
-    assert_eq!(&bytes[..], b"key package two");
+    assert_eq!(&bytes[..], &uploaded[1][..]);
 
     // Both packages are consumed now.
     let response = app
@@ -112,7 +113,7 @@ async fn revoked_device_key_packages_are_unfetchable() {
         .client
         .post(app.url("/v1/key-packages"))
         .bearer_auth(&token)
-        .body(b"kp".to_vec())
+        .body(key_package(&alice))
         .send()
         .await
         .expect("upload");
@@ -146,7 +147,7 @@ async fn anonymous_key_package_fetch_is_rejected() {
     app.client
         .post(app.url("/v1/key-packages"))
         .bearer_auth(&token)
-        .body(b"kp".to_vec())
+        .body(key_package(&alice))
         .send()
         .await
         .expect("upload");
@@ -174,7 +175,8 @@ async fn key_package_stock_is_capped_and_last_resort_survives_drain() {
     let bob = login(&app, "bob", "correct horse battery", "phone").await;
     let bob_token = bob["token"].as_str().expect("token").to_string();
 
-    for body in [b"one".to_vec(), b"two".to_vec()] {
+    let stock = [key_package(&alice), key_package(&alice)];
+    for body in stock.clone() {
         let response = app
             .client
             .post(app.url("/v1/key-packages"))
@@ -189,24 +191,25 @@ async fn key_package_stock_is_capped_and_last_resort_survives_drain() {
         .client
         .post(app.url("/v1/key-packages"))
         .bearer_auth(&token)
-        .body(b"three".to_vec())
+        .body(key_package(&alice))
         .send()
         .await
         .expect("upload");
     assert_eq!(response.status(), 409);
 
+    let resort = last_resort_package(&alice);
     let response = app
         .client
         .post(app.url("/v1/key-packages"))
         .bearer_auth(&token)
         .header("x-thrum-key-package-role", "last-resort")
-        .body(b"resort".to_vec())
+        .body(resort.clone())
         .send()
         .await
         .expect("last resort");
     assert_eq!(response.status(), 201);
 
-    for expected in [b"one".as_slice(), b"two".as_slice()] {
+    for expected in &stock {
         let response = app
             .get(
                 &format!("/v1/devices/{device_id}/key-package"),
@@ -214,7 +217,7 @@ async fn key_package_stock_is_capped_and_last_resort_survives_drain() {
             )
             .await;
         assert_eq!(response.status(), 200);
-        assert_eq!(response.bytes().await.unwrap(), expected);
+        assert_eq!(&response.bytes().await.unwrap()[..], &expected[..]);
     }
     for _ in 0..2 {
         let response = app
@@ -224,7 +227,7 @@ async fn key_package_stock_is_capped_and_last_resort_survives_drain() {
             )
             .await;
         assert_eq!(response.status(), 200);
-        assert_eq!(response.bytes().await.unwrap(), b"resort".as_slice());
+        assert_eq!(&response.bytes().await.unwrap()[..], &resort[..]);
     }
 }
 
@@ -244,7 +247,7 @@ async fn key_package_fetch_is_rate_limited_per_caller_and_device() {
         app.client
             .post(app.url("/v1/key-packages"))
             .bearer_auth(&token)
-            .body(b"kp".to_vec())
+            .body(key_package(&alice))
             .send()
             .await
             .expect("upload");
@@ -284,7 +287,7 @@ async fn key_package_fetch_is_rate_limited_per_caller_and_device() {
             .client
             .post(limited.url("/v1/key-packages"))
             .bearer_auth(&token)
-            .body(b"kp".to_vec())
+            .body(key_package(&alice))
             .send()
             .await
             .expect("upload");
@@ -307,4 +310,69 @@ async fn key_package_fetch_is_rate_limited_per_caller_and_device() {
         )
         .await;
     assert_eq!(response.status(), 429);
+}
+
+#[tokio::test]
+async fn a_key_package_must_be_for_the_uploading_device_and_keep_its_key() {
+    let app = TestApp::spawn().await;
+    register(&app, "alice", "correct horse battery").await;
+    let alice = login(&app, "alice", "correct horse battery", "laptop").await;
+    let token = alice["token"].as_str().expect("token").to_string();
+    let device_id = alice["device_id"].as_str().expect("device id").to_string();
+    register(&app, "bob", "correct horse battery").await;
+    let bob = login(&app, "bob", "correct horse battery", "phone").await;
+    let upload = |body: Vec<u8>| {
+        app.client
+            .post(app.url("/v1/key-packages"))
+            .bearer_auth(&token)
+            .body(body)
+            .send()
+    };
+
+    // Bytes that are not a key package, and a package for another device.
+    assert_eq!(
+        upload(b"not a key package".to_vec())
+            .await
+            .unwrap()
+            .status(),
+        400
+    );
+    assert_eq!(upload(key_package(&bob)).await.unwrap().status(), 400);
+    let elsewhere = thrum_core::mls::DeviceCrypto::generate(format!("alice#{device_id}-x"));
+    assert_eq!(
+        upload(elsewhere.new_key_package().unwrap())
+            .await
+            .unwrap()
+            .status(),
+        400
+    );
+
+    // The first valid package binds the key; another key is refused.
+    assert_eq!(upload(key_package(&alice)).await.unwrap().status(), 201);
+    let impostor = thrum_core::mls::DeviceCrypto::generate(format!("alice#{device_id}"));
+    assert_eq!(
+        upload(impostor.new_key_package().unwrap())
+            .await
+            .unwrap()
+            .status(),
+        409
+    );
+
+    // The device list carries the bound key.
+    let response = app
+        .get(
+            "/v1/users/alice/devices",
+            Some(bob["token"].as_str().unwrap()),
+        )
+        .await;
+    let body: serde_json::Value = response.json().await.unwrap();
+    use base64::Engine as _;
+    let bound = base64::engine::general_purpose::STANDARD
+        .decode(
+            body["signature_keys"][&device_id]
+                .as_str()
+                .expect("bound key"),
+        )
+        .unwrap();
+    assert_eq!(bound, common::device_keys(&alice).signature_key());
 }

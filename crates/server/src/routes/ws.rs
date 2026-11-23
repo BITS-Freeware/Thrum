@@ -32,22 +32,49 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
 
     // Register before catch-up so nothing is missed in between. A message
     // delivered live right in this window can also come from the queue, so
-    // clients deduplicate by message id.
+    // clients deduplicate by message id. The hub holds the only sender into
+    // this connection's channel: when a newer connection of the device
+    // replaces it, or the device is ended, the channel closes and so does
+    // this socket.
     let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<ServerFrame>();
-    state.hub.register(&authed.device_id, outbound_tx.clone());
+    let connection_id = state.hub.register(&authed.device_id, outbound_tx);
 
-    let _ = outbound_tx.send(ServerFrame::AuthOk {
+    let auth_ok = ServerFrame::AuthOk {
         device_id: authed.device_id.clone(),
-    });
-    // Drop messages nobody can still fetch before showing what is left.
+    };
+    if socket
+        .send(WsMessage::text(render_server_frame(&auth_ok)))
+        .await
+        .is_err()
+    {
+        state.hub.remove(&authed.device_id, connection_id);
+        return;
+    }
+    // Drop messages nobody can still fetch, then send what is left one
+    // page at a time, so a long backlog is never held in memory at once.
     let keep_older_than = now() - state.cfg.queue_ttl_seconds;
     let _ = messages::cleanup_expired(&state.db, keep_older_than).await;
-    if let Ok(queued) =
-        messages::undelivered_for_device(&state.db, state.backend, &authed.device_id).await
-    {
-        for frame in queued {
-            let _ = outbound_tx.send(frame);
+    let mut cursor = None;
+    loop {
+        let Ok((page, next)) =
+            messages::undelivered_page(&state.db, state.backend, &authed.device_id, cursor).await
+        else {
+            break;
+        };
+        for frame in &page {
+            if socket
+                .send(WsMessage::text(render_server_frame(frame)))
+                .await
+                .is_err()
+            {
+                state.hub.remove(&authed.device_id, connection_id);
+                return;
+            }
         }
+        if (page.len() as i64) < messages::CATCH_UP_PAGE {
+            break;
+        }
+        cursor = next;
     }
 
     let (mut sink, mut stream) = socket.split();
@@ -80,7 +107,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
             },
         }
     }
-    state.hub.remove(&authed.device_id);
+    state.hub.remove(&authed.device_id, connection_id);
 }
 
 /// Expect the first frame to be a valid auth frame. Any other behavior

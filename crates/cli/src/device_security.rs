@@ -15,6 +15,8 @@ const PASSWORD: &str = "correct horse battery";
 
 struct Running {
     base: String,
+    /// The server's state, so a test can play a malicious operator.
+    state: thrum_server::state::AppState,
     _dir: tempfile::TempDir,
 }
 
@@ -34,11 +36,15 @@ impl Running {
             .await
             .expect("bind");
         let addr = listener.local_addr().expect("addr");
+        let serving = state.clone();
         tokio::spawn(async move {
-            thrum_server::serve(state, listener).await.expect("server");
+            thrum_server::serve(serving, listener)
+                .await
+                .expect("server");
         });
         Self {
             base: format!("http://{addr}"),
+            state,
             _dir: dir,
         }
     }
@@ -69,8 +75,9 @@ async fn drain(chat: &Chat) {
             once: false,
             timeout_secs: 1,
         },
-        |conversation, message_id, sender, payload| {
+        async |conversation: &str, message_id: &str, sender: &str, payload: &[u8]| {
             chat.interpret(conversation, message_id, sender, payload)
+                .await
         },
         |_| {},
     )
@@ -188,10 +195,106 @@ async fn a_revoked_device_cannot_read_messages_sent_afterwards() {
     let mut mls_dir = alice_path.as_os_str().to_os_string();
     mls_dir.push(".mls");
     let stolen_keys = DeviceCrypto::load(std::path::Path::new(&mls_dir)).expect("stolen keys");
-    if let Ok(Incoming::Application { payload, .. }) =
-        stolen_keys.process_incoming(&conversation, &mls)
-    {
+    if let Ok(Incoming::Application { payload, .. }) = stolen_keys.process_incoming(
+        &conversation,
+        &mls,
+        &thrum_core::membership::ServerRoster::new(),
+    ) {
         let text = String::from_utf8_lossy(&payload);
         panic!("revoked device read a later message: {text}");
     }
+}
+
+/// The operator hands out a known device under a key of its own: in a new
+/// conversation, and after the device was revoked and comes back. Either
+/// way the device is not added with the new key, because this client
+/// pinned the key it first saw.
+#[tokio::test]
+async fn a_known_device_with_another_key_is_not_added() {
+    let server = Running::spawn().await;
+    let client = Client::new(server.base.clone());
+    client.register("alice", PASSWORD).await.expect("register");
+    client.register("bob", PASSWORD).await.expect("register");
+    let dir = server._dir.path();
+    let (alice_session, alice_path) = login(&client, dir, "alice", "laptop").await;
+    let (bob_session, bob_path) = login(&client, dir, "bob", "laptop").await;
+    let (phone_session, _) = login(&client, dir, "bob", "phone").await;
+    let phone = format!("bob#{}", phone_session.device_id);
+    let alice = Chat::open(client.clone(), alice_session, &alice_path).expect("alice");
+    let first = alice
+        .create_conversation(&["bob".into()], "")
+        .await
+        .expect("create");
+    assert!(alice.group_members(&first).unwrap().contains(&phone));
+
+    // The operator swaps the phone's key and its key packages for its own.
+    let impostor = DeviceCrypto::generate(phone.clone());
+    let db = &server.state.db;
+    sqlx::query("UPDATE devices SET signature_key = $1 WHERE id = $2")
+        .bind(impostor.signature_key())
+        .bind(&phone_session.device_id)
+        .execute(db)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM key_packages WHERE device_id = $1")
+        .bind(&phone_session.device_id)
+        .execute(db)
+        .await
+        .unwrap();
+    for n in 0..4 {
+        sqlx::query(
+            "INSERT INTO key_packages (id, device_id, content, created_at, last_resort) \
+             VALUES ($1, $2, $3, 0, 0)",
+        )
+        .bind(format!("impostor-{n}"))
+        .bind(&phone_session.device_id)
+        .bind(impostor.new_key_package().unwrap())
+        .execute(db)
+        .await
+        .unwrap();
+    }
+
+    // A new conversation with a known account is not a first sight.
+    let second = alice
+        .create_conversation(&["bob".into()], "")
+        .await
+        .expect("create second");
+    let members = alice.group_members(&second).unwrap();
+    assert!(
+        members
+            .iter()
+            .any(|m| m == &format!("bob#{}", bob_session.device_id))
+    );
+    assert!(
+        !members.contains(&phone),
+        "the impostor key was added: {members:?}"
+    );
+    assert!(
+        alice
+            .pending_devices()
+            .iter()
+            .any(|(_, identity)| identity == &phone),
+        "the changed device should wait for the user"
+    );
+
+    // Revoked, then listed again: the device waits for the user.
+    sqlx::query("UPDATE devices SET revoked_at = 1 WHERE id = $1")
+        .bind(&phone_session.device_id)
+        .execute(db)
+        .await
+        .unwrap();
+    alice.sync().await.expect("sync after revoke");
+    assert!(!alice.group_members(&first).unwrap().contains(&phone));
+    sqlx::query("UPDATE devices SET revoked_at = NULL WHERE id = $1")
+        .bind(&phone_session.device_id)
+        .execute(db)
+        .await
+        .unwrap();
+    let report = alice.sync().await.expect("sync after return");
+    assert!(!alice.group_members(&first).unwrap().contains(&phone));
+    assert!(
+        report.pending.iter().any(|line| line.contains(&phone)),
+        "pending was {report:?}"
+    );
+    drop(bob_path);
 }

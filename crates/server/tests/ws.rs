@@ -356,3 +356,90 @@ async fn sender_is_not_delivered_own_message() {
 fn decode(encoded: &str) -> Vec<u8> {
     thrum_core::protocol::decode_payload(encoded).expect("valid base64")
 }
+
+/// True when the server closes the socket within `wait`; false when it is
+/// still open (nothing arrives) or a frame arrives.
+async fn closed_within(ws: &mut Ws, wait: Duration) -> bool {
+    loop {
+        match tokio::time::timeout(wait, ws.next()).await {
+            Err(_) => return false,
+            Ok(None) | Ok(Some(Err(_))) | Ok(Some(Ok(WsMessage::Close(_)))) => return true,
+            Ok(Some(Ok(WsMessage::Text(_)))) => return false,
+            Ok(Some(Ok(_))) => continue,
+        }
+    }
+}
+
+/// A second socket for one device replaces the first: the server closes
+/// the first, and the second keeps getting live frames even after the
+/// first's close is processed.
+#[tokio::test]
+async fn a_second_socket_replaces_the_first_and_stays_live() {
+    let app = TestApp::spawn().await;
+    let alice = user(&app, "alice").await;
+    let bob = user(&app, "bob").await;
+    let conv = conversation_id(&app, alice["token"].as_str().unwrap()).await;
+    let token = bob["token"].as_str().unwrap();
+    let mut first = connect_authed(&app.base, token).await;
+    let mut second = connect_authed(&app.base, token).await;
+    assert!(
+        closed_within(&mut first, TIMEOUT).await,
+        "the replaced socket stays open"
+    );
+    let _ = first.close(None).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let id = send(&app, alice["token"].as_str().unwrap(), &conv, b"live").await;
+    match next_frame(&mut second).await {
+        Some(ServerFrame::Message { message_id, .. }) => assert_eq!(message_id, id),
+        other => panic!("the live socket got {other:?}"),
+    }
+}
+
+/// Revoking a device, logging it out, or deleting its account closes its
+/// open socket.
+#[tokio::test]
+async fn ending_a_device_closes_its_socket() {
+    let app = TestApp::spawn().await;
+    let bob = user(&app, "bob").await;
+    let phone = login(&app, "bob", PW, "phone").await;
+    let tablet = login(&app, "bob", PW, "tablet").await;
+
+    let mut phone_ws = connect_authed(&app.base, phone["token"].as_str().unwrap()).await;
+    let revoke = app
+        .delete(
+            &format!("/v1/devices/{}", phone["device_id"].as_str().unwrap()),
+            bob["token"].as_str(),
+        )
+        .await;
+    assert_eq!(revoke.status(), 204);
+    assert!(
+        closed_within(&mut phone_ws, TIMEOUT).await,
+        "revoked device's socket"
+    );
+
+    let mut tablet_ws = connect_authed(&app.base, tablet["token"].as_str().unwrap()).await;
+    let logout = app
+        .delete("/v1/sessions/current", tablet["token"].as_str())
+        .await;
+    assert!(logout.status().is_success());
+    assert!(
+        closed_within(&mut tablet_ws, TIMEOUT).await,
+        "logged-out device's socket"
+    );
+
+    let mut laptop_ws = connect_authed(&app.base, bob["token"].as_str().unwrap()).await;
+    let deleted = app
+        .client
+        .delete(app.url("/v1/account"))
+        .bearer_auth(bob["token"].as_str().unwrap())
+        .json(&json!({ "password": PW }))
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(deleted.status(), 204);
+    assert!(
+        closed_within(&mut laptop_ws, TIMEOUT).await,
+        "deleted account's socket"
+    );
+}

@@ -47,16 +47,19 @@ pub async fn list(
 }
 
 /// `GET /v1/users/{username}/devices`: ids of a user's devices that are
-/// still signed in. Clients compare this with the MLS roster to drop
-/// revoked devices. Unknown usernames are 404.
+/// still signed in, and the signature key each one registered (base64, or
+/// null before its first key package). Clients compare this with the MLS
+/// roster to drop revoked devices and to check the keys of group leaves.
+/// Unknown usernames are 404.
 pub async fn list_active(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(username): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    use base64::Engine as _;
     auth::authenticate(&state, &headers).await?;
-    let rows = sqlx::query_as::<_, (String,)>(
-        "SELECT d.id FROM devices d
+    let rows = sqlx::query_as::<_, (String, Option<Vec<u8>>)>(
+        "SELECT d.id, d.signature_key FROM devices d
          JOIN users u ON u.id = d.user_id
          WHERE lower(u.username) = lower($1) AND d.revoked_at IS NULL
          ORDER BY d.created_at, d.id",
@@ -72,9 +75,62 @@ pub async fn list_active(
     if known.is_none() {
         return Err(ApiError::not_found());
     }
-    Ok(Json(
-        serde_json::json!({ "devices": rows.into_iter().map(|(id,)| id).collect::<Vec<_>>() }),
-    ))
+    let mut rows = rows;
+    for (device_id, key) in rows.iter_mut() {
+        if key.is_none() {
+            *key = backfill_signature_key(&state, &username, device_id).await?;
+        }
+    }
+    let keys: serde_json::Map<String, serde_json::Value> = rows
+        .iter()
+        .map(|(id, key)| {
+            let value = key.as_ref().map_or(serde_json::Value::Null, |key| {
+                base64::engine::general_purpose::STANDARD.encode(key).into()
+            });
+            (id.clone(), value)
+        })
+        .collect();
+    Ok(Json(serde_json::json!({
+        "devices": rows.into_iter().map(|(id, _)| id).collect::<Vec<_>>(),
+        "signature_keys": keys,
+    })))
+}
+
+/// Bind the signature key of a device that uploaded key packages before
+/// keys were recorded, from one of its stored packages.
+async fn backfill_signature_key(
+    state: &AppState,
+    username: &str,
+    device_id: &str,
+) -> Result<Option<Vec<u8>>, ApiError> {
+    let stored: Option<Vec<u8>> =
+        sqlx::query_scalar("SELECT content FROM key_packages WHERE device_id = $1 LIMIT 1")
+            .bind(device_id)
+            .fetch_optional(&state.db)
+            .await?;
+    let Some(package) = stored else {
+        return Ok(None);
+    };
+    let Ok((identity, signature_key)) = thrum_core::mls::key_package_binding(&package) else {
+        return Ok(None);
+    };
+    let matches = identity
+        .split_once('#')
+        .is_some_and(|(user, device)| user.eq_ignore_ascii_case(username) && device == device_id);
+    if !matches {
+        return Ok(None);
+    }
+    sqlx::query("UPDATE devices SET signature_key = $1 WHERE id = $2 AND signature_key IS NULL")
+        .bind(&signature_key)
+        .bind(device_id)
+        .execute(&state.db)
+        .await?;
+    let bound: Option<Vec<u8>> =
+        sqlx::query_scalar("SELECT signature_key FROM devices WHERE id = $1")
+            .bind(device_id)
+            .fetch_one(&state.db)
+            .await?;
+    Ok(bound)
 }
 
 /// `DELETE /v1/devices/{device_id}`: revoke one of the caller's devices.
@@ -102,5 +158,6 @@ pub async fn revoke(
         .bind(&device_id)
         .execute(&state.db)
         .await?;
+    state.hub.disconnect(&[device_id]);
     Ok(StatusCode::NO_CONTENT)
 }

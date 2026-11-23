@@ -25,18 +25,33 @@ pub struct Config {
     pub login_backoff_base_seconds: u64,
     /// Longest login lockout, in seconds.
     pub login_backoff_cap_seconds: u64,
+    /// Failed password checks against one account per hour, from any
+    /// address, before every address is refused for the rest of the hour.
+    /// Zero means no ceiling.
+    pub login_failures_per_account_per_hour: u32,
     /// Proxies whose forwarded client address may be trusted. Empty means
     /// forwarded headers are ignored.
     pub trusted_proxies: Vec<String>,
     /// Key-package fetches per authenticated user per minute.
     pub key_package_fetch_per_caller_per_minute: u32,
-    /// Key-package fetches of one device per minute.
+    /// Key-package fetches of one device by one user per minute.
+    pub key_package_fetch_per_caller_device_per_minute: u32,
+    /// Key-package fetches of one device per minute, from everyone. Past
+    /// this, fetches get the device's last-resort package and leave its
+    /// one-time stock alone.
     pub key_package_fetch_per_device_per_minute: u32,
     /// One-time key packages stored per device. The last-resort package
     /// does not count toward this.
     pub key_package_max_per_device: u32,
     /// Members in one conversation, including the creator. Zero means no cap.
     pub max_group_members: u32,
+    /// Signed-in (not revoked) devices per account. Zero means no cap.
+    pub max_devices_per_account: u32,
+    /// Messages one device may send per minute.
+    pub messages_per_device_per_minute: u32,
+    /// Bytes of messages one account has sent that some device has not
+    /// received yet. Zero means no cap.
+    pub queued_bytes_per_account: u64,
     /// Link the web client shows for this server's source code.
     pub source_url: String,
     /// Largest accepted message payload in bytes.
@@ -74,11 +89,16 @@ impl Default for Config {
             login_failures_before_backoff: 5,
             login_backoff_base_seconds: 30,
             login_backoff_cap_seconds: 15 * 60,
+            login_failures_per_account_per_hour: 100,
             trusted_proxies: Vec::new(),
             key_package_fetch_per_caller_per_minute: 120,
+            key_package_fetch_per_caller_device_per_minute: 10,
             key_package_fetch_per_device_per_minute: 60,
             key_package_max_per_device: 100,
             max_group_members: 50,
+            max_devices_per_account: 20,
+            messages_per_device_per_minute: 120,
+            queued_bytes_per_account: 100 * 1024 * 1024,
             source_url: DEFAULT_SOURCE_URL.to_string(),
             message_max_bytes: 256 * 1024,
             queue_ttl_seconds: 7 * 24 * 60 * 60,
@@ -120,6 +140,10 @@ impl Config {
             "THRUM_LOGIN_BACKOFF_CAP_SECONDS",
             cfg.login_backoff_cap_seconds,
         );
+        cfg.login_failures_per_account_per_hour = env_u32(
+            "THRUM_LOGIN_FAILURES_PER_ACCOUNT_PER_HOUR",
+            cfg.login_failures_per_account_per_hour,
+        );
         if let Ok(value) = env::var("THRUM_TRUSTED_PROXIES") {
             cfg.trusted_proxies = value
                 .split(',')
@@ -132,6 +156,10 @@ impl Config {
             "THRUM_KEY_PACKAGE_FETCH_PER_CALLER_PER_MINUTE",
             cfg.key_package_fetch_per_caller_per_minute,
         );
+        cfg.key_package_fetch_per_caller_device_per_minute = env_u32(
+            "THRUM_KEY_PACKAGE_FETCH_PER_CALLER_DEVICE_PER_MINUTE",
+            cfg.key_package_fetch_per_caller_device_per_minute,
+        );
         cfg.key_package_fetch_per_device_per_minute = env_u32(
             "THRUM_KEY_PACKAGE_FETCH_PER_DEVICE_PER_MINUTE",
             cfg.key_package_fetch_per_device_per_minute,
@@ -141,6 +169,16 @@ impl Config {
             cfg.key_package_max_per_device,
         );
         cfg.max_group_members = env_u32("THRUM_MAX_GROUP_MEMBERS", cfg.max_group_members);
+        cfg.max_devices_per_account =
+            env_u32("THRUM_MAX_DEVICES_PER_ACCOUNT", cfg.max_devices_per_account);
+        cfg.messages_per_device_per_minute = env_u32(
+            "THRUM_MESSAGES_PER_DEVICE_PER_MINUTE",
+            cfg.messages_per_device_per_minute,
+        );
+        cfg.queued_bytes_per_account = env_u64(
+            "THRUM_QUEUED_BYTES_PER_ACCOUNT",
+            cfg.queued_bytes_per_account,
+        );
         if let Ok(value) = env::var("THRUM_SOURCE_URL")
             && !value.trim().is_empty()
         {

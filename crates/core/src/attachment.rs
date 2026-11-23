@@ -32,6 +32,13 @@ impl FileKey {
     }
 }
 
+/// Whether `id` is a well-formed blob id: 32 hex characters. A received
+/// attachment with any other id is not one a server could have issued, and
+/// clients must not put it into a request.
+pub fn is_blob_id(id: &str) -> bool {
+    id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 /// Encrypt `plaintext` for the blob with id `blob_id`.
 ///
 /// Returns the ciphertext with the 16-byte GCM tag appended.

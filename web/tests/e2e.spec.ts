@@ -166,3 +166,68 @@ test("two users chat live, form a group, and share an encrypted attachment", asy
   await aliceContext.close();
   await bobContext.close();
 });
+
+test("a second tab waits while the first one runs the device", async ({ browser }) => {
+  const context = await browser.newContext();
+  const first = await context.newPage();
+  await register(first, "carol");
+  const second = await context.newPage();
+  await second.goto("/");
+  await expect(
+    second.getByRole("heading", { name: "Thrum is open in another tab" }),
+  ).toBeVisible();
+  await first.close();
+  await expect(second.getByRole("heading", { name: "Chats" })).toBeVisible();
+  await context.close();
+});
+
+test("messages that can never be read are dropped, not replayed", async ({
+  browser,
+  request,
+}) => {
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  const warnings: string[] = [];
+  page.on("console", (msg) => {
+    if (msg.type() === "warning") warnings.push(msg.text());
+  });
+  await register(page, "dave");
+
+  // Another member sends bytes no client can read: no envelope at all, and
+  // an envelope whose data is not base64.
+  expect(
+    (await request.post("/v1/accounts", { data: { username: "mallory", password: PASSWORD } }))
+      .status(),
+  ).toBe(201);
+  const session = await (
+    await request.post("/v1/sessions", {
+      data: { username: "mallory", password: PASSWORD, device_label: "api" },
+    })
+  ).json();
+  const headers = { authorization: `Bearer ${session.token}` };
+  const conversation = await (
+    await request.post("/v1/conversations", {
+      headers,
+      data: { members: ["dave"], name: "junk" },
+    })
+  ).json();
+  for (const body of ["not an envelope", '{"kind":"mls","data":"%%%"}']) {
+    const sent = await request.post(`/v1/conversations/${conversation.id}/messages`, {
+      headers,
+      data: Buffer.from(body),
+    });
+    expect(sent.status()).toBe(201);
+  }
+  const dropped = () => warnings.filter((w) => w.includes("undecodable")).length;
+  await expect.poll(dropped).toBe(2);
+
+  // Connecting again offers nothing: both were acknowledged.
+  warnings.length = 0;
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Chats" })).toBeVisible();
+  await page.waitForTimeout(2_000);
+  expect(
+    warnings.filter((w) => w.includes("undecodable") || w.includes("before its group")),
+  ).toEqual([]);
+  await context.close();
+});
