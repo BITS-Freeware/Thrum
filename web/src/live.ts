@@ -16,6 +16,9 @@ export class LiveConnection {
    * welcome before the commit and the application messages that follow.
    */
   private processing: Promise<void> = Promise.resolve();
+  /** When the current socket opened, and when its last frame arrived. */
+  private openedAt: number | null = null;
+  private lastFrameAt = 0;
 
   constructor(
     private readonly session: CryptoSession,
@@ -36,6 +39,31 @@ export class LiveConnection {
     return this.processing;
   }
 
+  /**
+   * Resolves once the server's queue for this device has been applied:
+   * the connection is authenticated, every frame received is handled, and
+   * no frame has arrived for a short quiet period (the server sends the
+   * queue right after authentication). Resolves at once when offline,
+   * and gives up after a few seconds so a busy group cannot stall callers.
+   */
+  async caughtUp(): Promise<void> {
+    const quietMs = 700;
+    const giveUpAt = Date.now() + 5000;
+    for (;;) {
+      await this.processing;
+      const socket = this.socket;
+      if (!socket || socket.readyState !== WebSocket.OPEN) return;
+      const now = Date.now();
+      const quiet =
+        this.openedAt !== null &&
+        now - this.openedAt >= quietMs &&
+        now - this.lastFrameAt >= quietMs;
+      if (quiet) return;
+      if (now >= giveUpAt) return;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
+
   stop(): void {
     this.closed = true;
     this.socket?.close();
@@ -52,6 +80,7 @@ export class LiveConnection {
     const socket = new WebSocket(url);
     this.socket = socket;
     socket.onopen = () => {
+      this.openedAt = Date.now();
       this.reconnectDelayMs = 1000;
       this.onChange(true);
       socket.send(this.session.authFrame());
@@ -59,10 +88,14 @@ export class LiveConnection {
     socket.onmessage = (event) => {
       if (typeof event.data !== "string") return;
       const text = event.data;
+      this.lastFrameAt = Date.now();
       this.processing = this.processing.then(() => this.deliver(text));
     };
     socket.onclose = () => {
-      if (this.socket === socket) this.socket = null;
+      if (this.socket === socket) {
+        this.socket = null;
+        this.openedAt = null;
+      }
       this.onChange(false);
       if (!this.closed) {
         setTimeout(() => this.connect(), this.reconnectDelayMs);

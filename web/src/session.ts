@@ -69,6 +69,13 @@ export class CryptoSession {
    * commit has already ended, which the removed device can still read.
    */
   beforeSend: (() => Promise<void>) | null = null;
+  /**
+   * Waits until the live connection has applied everything the server had
+   * queued for this device; set by the live connection. Planning roster
+   * changes before a queued commit is applied would commit a second change
+   * in an old epoch and split the group.
+   */
+  beforeSync: (() => Promise<void>) | null = null;
   /** Server roster JSON per conversation, for checking commits and welcomes. */
   private rosters = new Map<string, string>();
   private keyPackageTarget = 2;
@@ -335,6 +342,7 @@ export class CryptoSession {
   /** Refresh the conversation list from the server and sync every group. */
   async sync(): Promise<void> {
     if (!this.device) throw new Error("not logged in");
+    await this.beforeSync?.();
     await this.topUpKeyPackages();
     const conversations = await this.api.listConversations();
     for (const conversation of conversations) {
@@ -495,6 +503,7 @@ export class CryptoSession {
   async addMembers(conversationId: string, members: string[]): Promise<string[]> {
     const all = await this.api.addMembers(conversationId, members);
     await this.refreshConversation(conversationId);
+    await this.beforeSync?.();
     await this.syncGroup(conversationId, all, new Set(members));
     return all;
   }
@@ -503,6 +512,7 @@ export class CryptoSession {
   async removeMember(conversationId: string, username: string): Promise<void> {
     await this.api.removeMember(conversationId, username);
     await this.refreshConversation(conversationId);
+    await this.beforeSync?.();
     await this.syncGroup(conversationId, await this.memberList(conversationId), new Set());
   }
 

@@ -254,6 +254,7 @@ impl Chat {
             .add_members(&self.session.token, conversation_id, members)
             .await?;
         let admit: HashSet<String> = members.iter().cloned().collect();
+        self.catch_up().await?;
         let report = self
             .sync_group(conversation_id, &all_members, &admit)
             .await?;
@@ -324,6 +325,7 @@ impl Chat {
         conversation_id: &str,
         username: &str,
     ) -> Result<Vec<u8>, String> {
+        self.catch_up().await?;
         let roster = self
             .crypto
             .group_members(conversation_id)
@@ -558,7 +560,12 @@ impl Chat {
     /// Bring every conversation in line with the server and top up this
     /// device's key package stock. New device identities are not added
     /// unless this user has trusted them (or just added that account).
+    ///
+    /// Everything queued for this device is processed first: planning
+    /// against a roster that misses a commit already waiting would commit
+    /// a second change in an old epoch and split the group.
     pub async fn sync(&self) -> Result<SyncReport, String> {
+        self.catch_up().await?;
         self.top_up_key_packages().await?;
         let mut report = SyncReport::default();
         let empty = HashSet::new();

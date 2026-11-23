@@ -58,6 +58,11 @@ All notable changes to Thrum are documented here. The format follows
   `postgres` profile the server waits for PostgreSQL's health check.
 - Blob ids no longer appear in server logs; log lines name a blob by a
   short hash of its id.
+- A device that was offline while members were added or removed applies
+  those changes before it plans its own roster change or sends. Before,
+  its next sync could commit a stale change and split the group into
+  members who could no longer read each other. The command-line client's
+  `recv` also shows what was queued before it syncs.
 - The server stops cleanly on SIGTERM or Ctrl-C: it finishes open
   requests, closes the database and writes the SQLite write-ahead log back
   into the database file, so a copy of `thrum.sqlite` after a stop holds
