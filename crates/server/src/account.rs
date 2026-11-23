@@ -289,7 +289,10 @@ pub async fn delete_account(
         .bind(user_id)
         .fetch_all(&state.db)
         .await?;
-    sqlx::query("UPDATE devices SET revoked_at = $1, token_hash = 'revoked:' || id WHERE user_id = $2 AND revoked_at IS NULL")
+    // Only revoked_at changes here: the rows are deleted below, and changing
+    // the unique token_hash would make PostgreSQL lock the rows against the
+    // foreign-key checks of sends in flight, which can deadlock with them.
+    sqlx::query("UPDATE devices SET revoked_at = $1 WHERE user_id = $2 AND revoked_at IS NULL")
         .bind(accounts::now())
         .bind(user_id)
         .execute(&state.db)
