@@ -40,3 +40,16 @@ async fn unknown_route_is_404() {
         .expect("request");
     assert_eq!(response.status(), 404);
 }
+
+/// An unknown API path answers a JSON 404, and a known path with the wrong
+/// method still answers 405.
+#[tokio::test]
+async fn unknown_api_paths_are_json_404s() {
+    let app = common::TestApp::spawn().await;
+    let response = app.get("/v1/nope", None).await;
+    assert_eq!(response.status(), 404);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["error"], "not_found");
+    let response = app.get("/v1/invites/redeem", None).await;
+    assert_eq!(response.status(), 405);
+}

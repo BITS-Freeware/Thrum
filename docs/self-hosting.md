@@ -25,8 +25,12 @@ Compose publishes the server on `127.0.0.1:8080` only. On the same
 machine, open `http://127.0.0.1:8080/` for the web client, or point the
 CLI at `http://127.0.0.1:8080`. Data stays in the `thrum-data` volume.
 
-The container starts as root long enough to give `/data` to user `thrum`
-(uid 10001), then the server runs as that user. If you start the binary
+The container starts as root long enough to give a new `/data` volume to
+user `thrum` (uid 10001), then the server runs as that user with no
+capabilities and `no_new_privs`. The Compose file also drops every
+capability but the three the entrypoint needs, keeps the root filesystem
+read-only, and uses `thrum-server healthcheck` as its health check. The
+image has no setuid programs. If you start the binary
 yourself against an existing volume, that user must be able to write it:
 
 ```sh
@@ -40,15 +44,28 @@ section below has an nginx example. The image sets `THRUM_BIND=0.0.0.0`
 so the process can accept the proxy's connection from outside the
 container's network namespace. A binary you start yourself listens on
 `127.0.0.1` unless you set `THRUM_BIND`, and it prints a warning when
-that address is not a loopback address.
+that address is not a loopback address. Inside the image, where
+`0.0.0.0` is the image's own default, it prints a one-line note instead;
+setting `THRUM_BIND` to another address brings the full warning back.
 
-To run on PostgreSQL instead of SQLite:
+Without Compose, publish the port on loopback only. A plain `-p 8080:8080`
+listens on every interface, and Docker's published ports bypass host
+firewalls such as ufw:
+
+```sh
+docker run -d -p 127.0.0.1:8080:8080 -v thrum-data:/data <image>
+```
+
+To run on PostgreSQL instead of SQLite, uncomment `THRUM_DB` in
+`docker-compose.yml` first, then start both services:
 
 ```sh
 docker compose --profile postgres up -d --build
-# then uncomment THRUM_DB in docker-compose.yml and run again:
-docker compose --profile postgres up -d
 ```
+
+Starting without `THRUM_DB` set creates a SQLite database instead, and
+accounts made there stay there; Thrum has no tool to move a SQLite
+database to PostgreSQL.
 
 ## From source
 
@@ -70,6 +87,14 @@ THRUM_DB=/var/lib/thrum/thrum.sqlite \
 THRUM_WEB_DIR=web/dist \
 ./target/release/thrum-server
 ```
+
+`THRUM_DB` and `THRUM_BLOB_DIR` default to `thrum.sqlite` and `blobs` in
+the working directory, so a service started from another directory comes
+up with an empty database. Give absolute paths in a service unit. The
+server prints its effective configuration at startup (the S3 secret shown
+only as set or unset) and refuses to start on a value it cannot use: a
+number that does not parse, an unknown `THRUM_BLOB_BACKEND`, or a
+`THRUM_TRUSTED_PROXIES` entry that is not an address or CIDR.
 
 The server creates the SQLite file if it is missing, readable by its own
 user only, and the blob directory and every blob the same way. A database
@@ -168,19 +193,45 @@ job (keys are opaque ciphertext).
 The server speaks plain HTTP. Anything reachable from another machine
 needs a TLS-terminating proxy in front of it. Serving port 8080 directly
 on a public address exposes passwords and session tokens. WebSocket
-connections to `/ws` must be proxied with upgrade support. For nginx:
+connections to `/v1/ws` must be proxied with upgrade support. For nginx:
 
 ```nginx
-location / {
-    proxy_pass http://127.0.0.1:8080;
-    proxy_http_version 1.1;
-    proxy_set_header Upgrade $http_upgrade;
-    proxy_set_header Connection "upgrade";
-    proxy_set_header Host $host;
-    # Replace, never append: a client must not choose its own address.
-    proxy_set_header X-Forwarded-For $remote_addr;
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name chat.example.org;
+    ssl_certificate     /etc/letsencrypt/live/chat.example.org/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/chat.example.org/privkey.pem;
+    add_header Strict-Transport-Security "max-age=31536000" always;
+
+    # Above THRUM_ATTACHMENT_MAX_BYTES (20 MiB by default); nginx's own
+    # default of 1 MiB refuses most attachments.
+    client_max_body_size 21m;
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        # Replace, never append: a client must not choose its own address.
+        proxy_set_header X-Forwarded-For $remote_addr;
+        # Live connections stay open for hours; the server pings every
+        # 30 seconds, well inside this.
+        proxy_read_timeout 1h;
+    }
+}
+
+server {
+    listen 80;
+    server_name chat.example.org;
+    return 301 https://$host$request_uri;
 }
 ```
+
+If you raise `THRUM_ATTACHMENT_MAX_BYTES`, raise `client_max_body_size`
+with it.
 
 Rate limits follow the client address, so the server must know it. Set
 `THRUM_TRUSTED_PROXIES` to the address the proxy connects from, and make
@@ -197,12 +248,27 @@ to its own origin.
 
 ## Backups
 
-- **SQLite**: stop the server (or use `sqlite3 thrum.sqlite ".backup
-  ..."`), then copy the database file and the blob directory.
+- **SQLite**: stop the server, then copy the database file and the blob
+  directory. The server stops cleanly on SIGTERM (`docker compose stop`,
+  `systemctl stop`) and writes its write-ahead log back into the database
+  file, so after a clean stop `thrum.sqlite` alone holds everything. While
+  it runs, the latest rows can still be in `thrum.sqlite-wal`: either copy
+  `thrum.sqlite`, `thrum.sqlite-wal` and `thrum.sqlite-shm` together, or
+  make a consistent copy with `sqlite3 thrum.sqlite ".backup backup.sqlite"`
+  (the `sqlite3` tool is not in the container image; run it on the host
+  against the volume's files).
+- With Compose: `docker compose stop thrum`, copy the `thrum-data` volume
+  (for example `docker run --rm -v thrum_thrum-data:/data -v "$PWD":/out
+  debian:bookworm-slim tar -C /data -czf /out/thrum-data.tgz .`), then
+  `docker compose start thrum`.
 - **PostgreSQL**: `pg_dump` plus the blob directory (or the object
   store).
 - The database is useless without the blobs and vice versa: back up both
   together.
+- Deletion and backups: SQLite overwrites deleted rows in place
+  (`secure_delete`), but a backup taken before an account was deleted still
+  holds it until you rotate it. PostgreSQL keeps deleted rows on disk until
+  `VACUUM` reclaims them; autovacuum does this over time.
 
 Blobs and messages are ciphertext; backing them up is safe but restoring
 is only useful together with the users' own device key material, which

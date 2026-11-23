@@ -16,6 +16,9 @@ use crate::frames::{parse_client_frame, render_server_frame};
 use crate::messages;
 use crate::state::AppState;
 
+/// How often the server pings an open connection.
+const PING_INTERVAL: Duration = Duration::from_secs(30);
+
 /// How long the server waits for the auth frame after connecting.
 const AUTH_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -78,8 +81,17 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
     }
 
     let (mut sink, mut stream) = socket.split();
+    // Keep idle connections alive through proxies that drop quiet sockets
+    // (nginx's default read timeout is 60 seconds).
+    let mut ping =
+        tokio::time::interval_at(tokio::time::Instant::now() + PING_INTERVAL, PING_INTERVAL);
     loop {
         tokio::select! {
+            _ = ping.tick() => {
+                if sink.send(WsMessage::Ping(Vec::new().into())).await.is_err() {
+                    break;
+                }
+            }
             outbound = outbound_rx.recv() => match outbound {
                 Some(frame) => {
                     if sink.send(WsMessage::text(render_server_frame(&frame))).await.is_err() {

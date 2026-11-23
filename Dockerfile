@@ -1,6 +1,7 @@
 # Build the wasm package and the web client, then the server, then ship one
-# small image that serves both. The server's API lives under /v1 and /ws; the
-# web client is static files for everything else (THRUM_WEB_DIR).
+# small image that serves both. The server's API, WebSocket included, lives
+# under /v1; the web client is static files for everything else
+# (THRUM_WEB_DIR).
 
 FROM rust:1.91.0-slim-bookworm AS wasm
 WORKDIR /src
@@ -43,15 +44,19 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && groupadd --system --gid 10001 thrum \
     && useradd --system --uid 10001 --gid thrum --home-dir /var/lib/thrum --create-home thrum \
     && mkdir -p /data \
-    && chown thrum:thrum /data
+    && chown thrum:thrum /data \
+    && find / -xdev -type f -perm /6000 -exec chmod a-s {} +
 COPY --link --from=server /usr/local/bin/thrum-server /usr/local/bin/thrum-server
 COPY --link --from=web /src/web/dist /usr/share/thrum/web
 COPY --link docker/entrypoint.sh /usr/local/bin/thrum-entrypoint
 ENV THRUM_BIND=0.0.0.0 \
+    THRUM_IMAGE_BIND=0.0.0.0 \
     THRUM_DB=/data/thrum.sqlite \
     THRUM_PORT=8080 \
     THRUM_WEB_DIR=/usr/share/thrum/web \
     THRUM_BLOB_DIR=/data/blobs
 VOLUME /data
 EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
+    CMD ["thrum-server", "healthcheck"]
 ENTRYPOINT ["thrum-entrypoint"]

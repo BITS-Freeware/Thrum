@@ -6,6 +6,43 @@ All notable changes to Thrum are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `thrum-server healthcheck` checks `/healthz` from inside the container;
+  the image and the Compose file use it as their health check.
+- The server prints its effective configuration at startup, with the S3
+  secret shown only as set or unset.
+
+### Changed
+
+- The server refuses to start on a configuration value it cannot use (a
+  number that does not parse, an unknown `THRUM_BLOB_BACKEND`, or a bad
+  `THRUM_TRUSTED_PROXIES` entry) and names the variable, instead of
+  falling back to a default.
+- The Compose file drops every capability the entrypoint does not need,
+  sets `no-new-privileges`, keeps the root filesystem read-only and limits
+  the number of processes. The server runs with no capabilities, and the
+  image has no setuid programs.
+- SQLite overwrites deleted rows in place (`secure_delete`).
+- The server pings live connections every 30 seconds, so proxies with an
+  idle timeout keep them open.
+- In the container image, the default `0.0.0.0` bind prints a one-line
+  note instead of the full warning, which now appears only when an
+  operator chose a non-loopback address.
+
+### Fixed
+
+- The server stops cleanly on SIGTERM or Ctrl-C: it finishes open
+  requests, closes the database and writes the SQLite write-ahead log back
+  into the database file, so a copy of `thrum.sqlite` after a stop holds
+  everything.
+- An unknown path under `/v1/` answers with a JSON 404.
+- A PostgreSQL URL with an upper-case scheme is recognised.
+- The self-hosting guide gives a full nginx TLS example with the attachment
+  body size and WebSocket timeout it needs, the right WebSocket path
+  (`/v1/ws`), a safe backup procedure for SQLite, a loopback-only
+  `docker run` example, and the PostgreSQL quick start in the right order.
+
 ## [0.2.1] - 2026-11-22
 
 This release fixes the issues described in the repository's

@@ -52,7 +52,10 @@ fn create_private_database(path: &std::path::Path) -> std::io::Result<()> {
 /// A plain path is a SQLite file; `postgres://` selects PostgreSQL.
 pub async fn connect(url: &str) -> sqlx::Result<(AnyPool, Backend)> {
     sqlx::any::install_default_drivers();
-    let backend = if url.starts_with("postgres://") || url.starts_with("postgresql://") {
+    let scheme = url
+        .split_once("://")
+        .map(|(scheme, _)| scheme.to_ascii_lowercase());
+    let backend = if matches!(scheme.as_deref(), Some("postgres" | "postgresql")) {
         Backend::Postgres
     } else {
         Backend::Sqlite
@@ -100,7 +103,11 @@ pub async fn connect(url: &str) -> sqlx::Result<(AnyPool, Backend)> {
                 None => format!("sqlite:///{encoded}?mode=rwc"),
             }
         }
-        Backend::Postgres => url.to_string(),
+        // The scheme may be written in any case; the driver wants it lower.
+        Backend::Postgres => match url.split_once("://") {
+            Some((scheme, rest)) => format!("{}://{rest}", scheme.to_ascii_lowercase()),
+            None => url.to_string(),
+        },
     };
 
     let pool = sqlx::any::AnyPoolOptions::new()
@@ -113,6 +120,11 @@ pub async fn connect(url: &str) -> sqlx::Result<(AnyPool, Backend)> {
                 // once by the pool initialiser so it persists.
                 if conn.backend_name() == "SQLite" {
                     sqlx::query("PRAGMA foreign_keys = ON")
+                        .execute(&mut *conn)
+                        .await?;
+                    // Overwrite deleted content, so a deleted account's
+                    // rows do not linger in free pages of the file.
+                    sqlx::query("PRAGMA secure_delete = ON")
                         .execute(&mut *conn)
                         .await?;
                 }
