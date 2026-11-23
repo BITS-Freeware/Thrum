@@ -67,6 +67,11 @@ Starting without `THRUM_DB` set creates a SQLite database instead, and
 accounts made there stay there; Thrum has no tool to move a SQLite
 database to PostgreSQL.
 
+With the profile, the server waits for PostgreSQL's health check before
+it starts, and it retries the first connection for
+`THRUM_DB_CONNECT_WAIT_SECONDS` in any case. The server never prints the
+database password: the URL appears in its output as `user:***@host`.
+
 ## From source
 
 Building needs Rust 1.91 (`rust-toolchain.toml` selects it) and Node 22
@@ -114,6 +119,7 @@ back to the default shown.
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `THRUM_DB` | `thrum.sqlite` | SQLite file path, or a `postgres://` URL |
+| `THRUM_DB_CONNECT_WAIT_SECONDS` | `30` | How long startup retries a PostgreSQL server that does not answer yet before it exits |
 | `THRUM_BIND` | `127.0.0.1` | Address to listen on. The container image sets `0.0.0.0` |
 | `THRUM_PORT` | `8080` | Port to listen on |
 | `THRUM_WEB_DIR` | unset | Serve the built web client from this directory |

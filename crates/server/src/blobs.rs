@@ -31,6 +31,29 @@ pub enum BlobError {
     S3(String),
 }
 
+/// A short stand-in for a blob id in logs. The id is a read capability, so
+/// logs carry the first eight hex digits of its SHA-256 instead.
+pub fn log_ref(id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(id.as_bytes());
+    let hex: String = digest[..4]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!("blob#{hex}")
+}
+
+/// `error` as text for a log line about blob `id`, with the id (which a
+/// storage error can carry in an object path) replaced by [`log_ref`].
+pub fn log_error(error: &dyn std::fmt::Display, id: &str) -> String {
+    let text = error.to_string();
+    if id.is_empty() {
+        text
+    } else {
+        text.replace(id, &log_ref(id))
+    }
+}
+
 /// Trait that abstracts the blob storage backend.
 #[async_trait]
 pub trait BlobStore: Send + Sync {
@@ -274,6 +297,22 @@ pub async fn sweep_expired(db: &AnyPool, store: &dyn BlobStore) -> usize {
         }
     }
     removed
+}
+
+#[cfg(test)]
+mod log_tests {
+    use super::{log_error, log_ref};
+
+    #[test]
+    fn log_lines_do_not_carry_the_blob_id() {
+        let id = "0123456789abcdef0123456789abcdef";
+        let error = format!("Object at location {id} not found");
+        let line = log_error(&error, id);
+        assert!(!line.contains(id), "{line}");
+        assert!(line.contains(&log_ref(id)));
+        assert_eq!(log_ref(id).len(), "blob#".len() + 8);
+        assert!(!log_ref(id).contains(&id[..8]));
+    }
 }
 
 #[cfg(test)]

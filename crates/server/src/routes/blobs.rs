@@ -70,7 +70,11 @@ pub async fn upload(
     }
 
     state.blob_store.put(&id, &body).await.map_err(|error| {
-        eprintln!("blob store put failed: {error}");
+        eprintln!(
+            "blob store put failed for {}: {}",
+            crate::blobs::log_ref(&id),
+            crate::blobs::log_error(&error, &id)
+        );
         ApiError::internal()
     })?;
 
@@ -100,7 +104,11 @@ pub async fn upload(
                 // Almost certainly the pre-check losing a race.
                 return Err(ApiError::conflict("blob_exists"));
             }
-            eprintln!("blob insert failed: {error}");
+            eprintln!(
+                "blob insert failed for {}: {}",
+                crate::blobs::log_ref(&id),
+                crate::blobs::log_error(&error, &id)
+            );
             return Err(error.into());
         }
     }
@@ -187,13 +195,20 @@ pub async fn fetch(
         .get(&id)
         .await
         .map_err(|error| {
-            eprintln!("blob store get failed: {error}");
+            eprintln!(
+                "blob store get failed for {}: {}",
+                crate::blobs::log_ref(&id),
+                crate::blobs::log_error(&error, &id)
+            );
             ApiError::internal()
         })?
         .ok_or_else(|| {
             // The row survived but the object did not; drop the dead row so
             // the next sweep does not trip over it either.
-            eprintln!("blob row {id} has no stored object");
+            eprintln!(
+                "blob row {} has no stored object",
+                crate::blobs::log_ref(&id)
+            );
             ApiError::not_found()
         })?;
 

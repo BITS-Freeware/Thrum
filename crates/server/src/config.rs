@@ -64,6 +64,9 @@ pub struct Config {
     pub daily_upload_bytes: u64,
     /// How long to keep blobs before expiry, in seconds.
     pub blob_retention_seconds: i64,
+    /// How long startup keeps retrying the first database connection, in
+    /// seconds, so a database that starts at the same time can come up.
+    pub db_connect_wait_seconds: u64,
     /// Storage backend: "disk" or "s3".
     pub blob_backend: String,
     /// Local directory for disk-backed blobs.
@@ -105,6 +108,7 @@ impl Default for Config {
             attachment_max_bytes: 20 * 1024 * 1024,
             daily_upload_bytes: 100 * 1024 * 1024,
             blob_retention_seconds: 30 * 24 * 60 * 60,
+            db_connect_wait_seconds: 30,
             blob_backend: "disk".to_string(),
             blob_dir: "blobs".to_string(),
             s3_endpoint: String::new(),
@@ -201,6 +205,7 @@ impl Config {
             num!("THRUM_ATTACHMENT_MAX_BYTES", cfg.attachment_max_bytes);
             num!("THRUM_DAILY_UPLOAD_BYTES", cfg.daily_upload_bytes);
             num!("THRUM_BLOB_RETENTION_SECONDS", cfg.blob_retention_seconds);
+            num!("THRUM_DB_CONNECT_WAIT_SECONDS", cfg.db_connect_wait_seconds);
         }
 
         if let Some(value) = get("THRUM_TRUSTED_PROXIES") {
@@ -311,6 +316,7 @@ impl std::fmt::Debug for Config {
             .field("attachment_max_bytes", &self.attachment_max_bytes)
             .field("daily_upload_bytes", &self.daily_upload_bytes)
             .field("blob_retention_seconds", &self.blob_retention_seconds)
+            .field("db_connect_wait_seconds", &self.db_connect_wait_seconds)
             .field("blob_backend", &self.blob_backend)
             .field("blob_dir", &self.blob_dir)
             .field("s3_endpoint", &self.s3_endpoint)

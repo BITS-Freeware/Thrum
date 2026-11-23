@@ -21,9 +21,7 @@ async fn main() {
     println!("thrum-server configuration: {cfg:?}");
     // THRUM_DB is a SQLite file path (default) or a postgres:// URL.
     let db_url = std::env::var("THRUM_DB").unwrap_or_else(|_| "thrum.sqlite".to_string());
-    let state = AppState::connect_database(&db_url, cfg)
-        .await
-        .unwrap_or_else(|error| panic!("failed to open database {db_url}: {error}"));
+    let state = open_database(&db_url, cfg).await;
     spawn_sweeper(state.clone());
     let port: u16 = std::env::var("THRUM_PORT")
         .ok()
@@ -104,6 +102,34 @@ async fn main() {
 
 /// Exit status for `thrum-server healthcheck`: 0 when `GET /healthz` on
 /// the configured port answers 200 within five seconds.
+/// Open the database, retrying a PostgreSQL connection for up to
+/// `db_connect_wait_seconds` so a database that starts beside the server can
+/// come up. Nothing printed carries the database password.
+async fn open_database(db_url: &str, cfg: Config) -> AppState {
+    use thrum_server::db;
+    let shown = db::redact_url(db_url);
+    println!("thrum-server database: {shown}");
+    let retry = db::backend_of(db_url) == db::Backend::Postgres;
+    let deadline =
+        tokio::time::Instant::now() + std::time::Duration::from_secs(cfg.db_connect_wait_seconds);
+    let mut delay = std::time::Duration::from_millis(250);
+    loop {
+        match AppState::connect_database(db_url, cfg.clone()).await {
+            Ok(state) => return state,
+            Err(error) => {
+                let message = db::scrub(&error.to_string(), db_url);
+                if !retry || tokio::time::Instant::now() >= deadline {
+                    eprintln!("error: failed to open database {shown}: {message}");
+                    std::process::exit(1);
+                }
+                eprintln!("waiting for the database {shown}: {message}");
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(std::time::Duration::from_secs(5));
+            }
+        }
+    }
+}
+
 async fn healthcheck() -> i32 {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let port: u16 = std::env::var("THRUM_PORT")

@@ -114,3 +114,31 @@ async fn the_image_default_bind_gets_a_note_and_a_chosen_one_a_warning() {
         "{stderr}"
     );
 }
+
+#[test]
+fn a_database_that_never_answers_ends_startup_without_its_password() {
+    let dir = tempfile::tempdir().unwrap();
+    let port = free_port();
+    let started = std::time::Instant::now();
+    let output = Command::new(env!("CARGO_BIN_EXE_thrum-server"))
+        .env(
+            "THRUM_DB",
+            format!("postgres://thrum:hunter2-secret@127.0.0.1:{port}/thrum"),
+        )
+        .env("THRUM_DB_CONNECT_WAIT_SECONDS", "1")
+        .env("THRUM_BLOB_DIR", dir.path().join("blobs"))
+        .env("THRUM_PORT", free_port().to_string())
+        .env_remove("THRUM_WEB_DIR")
+        .output()
+        .expect("run server");
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.status.code(), Some(1), "{all}");
+    assert!(!all.contains("hunter2-secret"), "{all}");
+    assert!(all.contains("thrum:***@127.0.0.1"), "{all}");
+    assert!(all.contains("waiting for the database"), "{all}");
+    assert!(started.elapsed() < Duration::from_secs(10));
+}

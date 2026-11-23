@@ -32,6 +32,13 @@ All notable changes to Thrum are documented here. The format follows
 
 ### Fixed
 
+- The server no longer prints the database password. The URL it logs has
+  the password replaced, and a PostgreSQL server that does not answer yet
+  is retried for `THRUM_DB_CONNECT_WAIT_SECONDS` (default 30) before
+  startup ends with an error instead of a panic. With the Compose
+  `postgres` profile the server waits for PostgreSQL's health check.
+- Blob ids no longer appear in server logs; log lines name a blob by a
+  short hash of its id.
 - The server stops cleanly on SIGTERM or Ctrl-C: it finishes open
   requests, closes the database and writes the SQLite write-ahead log back
   into the database file, so a copy of `thrum.sqlite` after a stop holds
