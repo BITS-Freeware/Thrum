@@ -59,25 +59,22 @@ pub async fn upload(
         ));
     }
 
-    let taken: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM blobs WHERE id = $1")
-        .bind(&id)
-        .fetch_one(&state.db)
-        .await?;
+    let taken: i64 = sqlx::query_scalar(
+        "SELECT (SELECT COUNT(*) FROM blobs WHERE id = $1)
+              + (SELECT COUNT(*) FROM blob_tombstones WHERE id = $1)",
+    )
+    .bind(&id)
+    .fetch_one(&state.db)
+    .await?;
     if taken > 0 {
         // Someone already registered this capability. Rejecting keeps one
         // user from replacing another user's blob.
         return Err(ApiError::conflict("blob_exists"));
     }
 
-    state.blob_store.put(&id, &body).await.map_err(|error| {
-        eprintln!(
-            "blob store put failed for {}: {}",
-            crate::blobs::log_ref(&id),
-            crate::blobs::log_error(&error, &id)
-        );
-        ApiError::internal()
-    })?;
-
+    // Claim the id with the row first, then store the object. Of two
+    // overlapping uploads of one id only one claims it, and only the
+    // claimant ever writes or deletes the object.
     let expires_at = accounts::now() + state.cfg.blob_retention_seconds;
     match record_upload(
         &state,
@@ -91,15 +88,13 @@ pub async fn upload(
     {
         Ok(()) => {}
         Err(Recorded::OverQuota) => {
-            let _ = state.blob_store.delete(&id).await;
             return Err(ApiError::new(
                 StatusCode::TOO_MANY_REQUESTS,
                 "quota_exceeded",
             ));
         }
+        Err(Recorded::Taken) => return Err(ApiError::conflict("blob_exists")),
         Err(Recorded::Failed(error)) => {
-            // Do not leave an unreferenced object behind.
-            let _ = state.blob_store.delete(&id).await;
             if matches!(error, SqlxError::Database(_)) {
                 // Almost certainly the pre-check losing a race.
                 return Err(ApiError::conflict("blob_exists"));
@@ -113,12 +108,32 @@ pub async fn upload(
         }
     }
 
+    if let Err(error) = state.blob_store.put(&id, &body).await {
+        eprintln!(
+            "blob store put failed for {}: {}",
+            crate::blobs::log_ref(&id),
+            crate::blobs::log_error(&error, &id)
+        );
+        // Release the claim. The object, if partly written, is this
+        // request's own; remove it before the row so it is never left
+        // without one.
+        if blobs::delete_object(state.blob_store.as_ref(), &id)
+            .await
+            .is_ok()
+        {
+            let _ = blobs::delete_blob_row(&state.db, &id).await;
+        }
+        return Err(ApiError::internal());
+    }
+
     Ok((StatusCode::CREATED, Json(json!({ "id": id }))))
 }
 
 /// Why an upload could not be recorded.
 enum Recorded {
     OverQuota,
+    /// A tombstone still holds the id.
+    Taken,
     Failed(SqlxError),
 }
 
@@ -128,9 +143,9 @@ impl From<SqlxError> for Recorded {
     }
 }
 
-/// Check the day's quota again and insert the blob row, under a lock on
-/// the uploader's account row, so parallel uploads cannot pass the quota
-/// together. The check before storing the object only saves work.
+/// Check the day's quota again and insert the blob row, claiming the id,
+/// under a lock on the uploader's account row, so parallel uploads cannot
+/// pass the quota together. The checks before this one only save work.
 async fn record_upload(
     state: &AppState,
     id: &str,
@@ -154,6 +169,13 @@ async fn record_upload(
     .await?;
     if (used.max(0) as u64).saturating_add(size as u64) > state.cfg.daily_upload_bytes {
         return Err(Recorded::OverQuota);
+    }
+    let tombstoned: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM blob_tombstones WHERE id = $1")
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?;
+    if tombstoned > 0 {
+        return Err(Recorded::Taken);
     }
     sqlx::query(
         "INSERT INTO blobs (id, uploader_id, size, expires_at, created_at)
@@ -203,8 +225,9 @@ pub async fn fetch(
             ApiError::internal()
         })?
         .ok_or_else(|| {
-            // The row survived but the object did not; drop the dead row so
-            // the next sweep does not trip over it either.
+            // An upload has claimed the id and is still storing the
+            // object, or the object is gone; either way there is nothing
+            // to serve yet.
             eprintln!(
                 "blob row {} has no stored object",
                 crate::blobs::log_ref(&id)

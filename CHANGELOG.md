@@ -38,6 +38,19 @@ All notable changes to Thrum are documented here. The format follows
 
 ### Fixed
 
+- Account deletion is all or nothing. It signs the account's devices out
+  first and runs every database step in one transaction, so another
+  device writing at the same moment can no longer leave a half-deleted
+  account that still works. Blob objects are deleted after the commit,
+  and ones the store fails to delete are retried by the sweeper
+  (decision 0010, migration 0010).
+- The sweeper keeps an expired blob's row until the store has deleted its
+  object, so a failed delete is retried instead of orphaning the object.
+- An upload claims its blob id before storing the object, and the disk
+  store writes each object under a temporary name and renames it into
+  place. Two overlapping uploads of one id no longer leave a row whose
+  object the losing upload deleted, and a fetch never reads a partly
+  written object.
 - The server no longer prints the database password. The URL it logs has
   the password replaced, and a PostgreSQL server that does not answer yet
   is retried for `THRUM_DB_CONNECT_WAIT_SECONDS` (default 30) before

@@ -264,8 +264,10 @@ async fn export_page(
 
 /// `DELETE /v1/account`: password-confirmed account deletion.
 ///
-/// Deletes in foreign-key-safe order: blobs, invites, messages, devices,
-/// ownership transfer, user row, memberless conversations.
+/// Signs the account's devices out, then deletes in one transaction, in
+/// foreign-key-safe order: blobs, invites, messages, devices, ownership
+/// transfer, user row, memberless conversations. Blob objects go after
+/// the commit (decision 0010).
 pub async fn delete_account(
     State(state): State<AppState>,
     authed: auth::AuthedDevice,
@@ -281,25 +283,69 @@ pub async fn delete_account(
     let stored: String = user_row.get("password_hash");
     accounts::check_password(&body.password, &stored).await?;
 
-    let db = &state.db;
+    // Sign every device out first, so no new request of this account
+    // starts while the deletion runs, and close their sockets.
+    let device_ids: Vec<String> = sqlx::query_scalar("SELECT id FROM devices WHERE user_id = $1")
+        .bind(user_id)
+        .fetch_all(&state.db)
+        .await?;
+    sqlx::query("UPDATE devices SET revoked_at = $1 WHERE user_id = $2 AND revoked_at IS NULL")
+        .bind(accounts::now())
+        .bind(user_id)
+        .execute(&state.db)
+        .await?;
+    state.hub.disconnect(&device_ids);
 
-    // 1. Delete blob objects from the store, then blob rows.
+    // Every database step runs in one transaction, so a failure leaves the
+    // account as it was. Requests of this account that were already
+    // running finish before it starts or fail after it commits: SQLite has
+    // one writer, and on PostgreSQL the account and device rows are locked
+    // against the key-share locks that writes referencing them take.
+    let mut tx = state.db.begin().await?;
+    match state.backend {
+        crate::db::Backend::Sqlite => {
+            sqlx::query("UPDATE users SET created_at = created_at WHERE id = $1")
+                .bind(user_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        crate::db::Backend::Postgres => {
+            sqlx::query("SELECT id FROM users WHERE id = $1 FOR UPDATE")
+                .bind(user_id)
+                .fetch_all(&mut *tx)
+                .await?;
+            sqlx::query("SELECT id FROM devices WHERE user_id = $1 FOR UPDATE")
+                .bind(user_id)
+                .fetch_all(&mut *tx)
+                .await?;
+        }
+    }
+    let db = &mut *tx;
+
+    // 1. Blob rows. Their objects are deleted after the commit; until the
+    //    store confirms each one, a tombstone keeps its id from being
+    //    claimed again and lets the sweeper retry.
     let blob_ids: Vec<String> = sqlx::query_scalar("SELECT id FROM blobs WHERE uploader_id = $1")
         .bind(user_id)
-        .fetch_all(db)
+        .fetch_all(&mut *db)
         .await?;
-    for blob_id in &blob_ids {
-        let _ = state.blob_store.delete(blob_id).await;
-    }
+    sqlx::query(
+        "INSERT INTO blob_tombstones (id, created_at)
+         SELECT id, $2 FROM blobs WHERE uploader_id = $1
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .bind(user_id)
+    .bind(accounts::now())
+    .execute(&mut *db)
+    .await?;
     sqlx::query("DELETE FROM blobs WHERE uploader_id = $1")
         .bind(user_id)
-        .execute(db)
+        .execute(&mut *db)
         .await?;
-
     // 2. Invites the user minted.
     sqlx::query("DELETE FROM invites WHERE created_by = $1")
         .bind(user_id)
-        .execute(db)
+        .execute(&mut *db)
         .await?;
 
     // 3. Messages sent by the user's devices. Those some member has not
@@ -320,24 +366,19 @@ pub async fn delete_account(
            )",
     )
     .bind(user_id)
-    .execute(db)
+    .execute(&mut *db)
     .await?;
     sqlx::query(
         "DELETE FROM messages WHERE sender_device IN (SELECT id FROM devices WHERE user_id = $1)",
     )
     .bind(user_id)
-    .execute(db)
+    .execute(&mut *db)
     .await?;
 
-    // 4. Devices (cascade key packages, deliveries). Their open sockets
-    //    are closed once the rows are gone.
-    let device_ids: Vec<String> = sqlx::query_scalar("SELECT id FROM devices WHERE user_id = $1")
-        .bind(user_id)
-        .fetch_all(db)
-        .await?;
+    // 4. Devices (cascade key packages, deliveries).
     sqlx::query("DELETE FROM devices WHERE user_id = $1")
         .bind(user_id)
-        .execute(db)
+        .execute(&mut *db)
         .await?;
 
     // 5. Transfer ownership of conversations the user owned.
@@ -357,7 +398,7 @@ pub async fn delete_account(
         "#,
     )
     .bind(user_id)
-    .execute(db)
+    .execute(&mut *db)
     .await?;
 
     // 6. Retire the name, so nobody can register it and inherit the trust
@@ -370,13 +411,12 @@ pub async fn delete_account(
     )
     .bind(user_id)
     .bind(accounts::now())
-    .execute(db)
+    .execute(&mut *db)
     .await?;
     sqlx::query("DELETE FROM users WHERE id = $1")
         .bind(user_id)
-        .execute(db)
+        .execute(&mut *db)
         .await?;
-    state.hub.disconnect(&device_ids);
 
     // 7. Delete memberless conversations (cascade messages, invites).
     sqlx::query(
@@ -385,8 +425,24 @@ pub async fn delete_account(
             WHERE cm.conversation_id = conversations.id
         )"#,
     )
-    .execute(db)
+    .execute(&mut *db)
     .await?;
+
+    tx.commit().await?;
+    // A device that connected between the sign-out and the commit.
+    state.hub.disconnect(&device_ids);
+
+    for blob_id in &blob_ids {
+        if crate::blobs::delete_object(state.blob_store.as_ref(), blob_id)
+            .await
+            .is_ok()
+        {
+            let _ = sqlx::query("DELETE FROM blob_tombstones WHERE id = $1")
+                .bind(blob_id)
+                .execute(&state.db)
+                .await;
+        }
+    }
 
     Ok(StatusCode::NO_CONTENT)
 }
