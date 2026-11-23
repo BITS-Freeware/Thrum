@@ -55,8 +55,12 @@ impl Server {
         let mut bytes = std::fs::read(&self.db_path).expect("read db");
         let mut wal = self.db_path.clone().into_os_string();
         wal.push("-wal");
-        if let Ok(log) = std::fs::read(&wal) {
-            bytes.extend_from_slice(&log);
+        // The log may be absent after a checkpoint; any other read error
+        // must fail the test rather than skip the rows that live there.
+        match std::fs::read(&wal) {
+            Ok(log) => bytes.extend_from_slice(&log),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("read {}: {error}", wal.to_string_lossy()),
         }
         assert!(
             bytes.windows(known.len()).any(|w| w == known.as_bytes()),

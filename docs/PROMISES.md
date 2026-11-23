@@ -274,9 +274,12 @@ is withdrawn, the entry stays with the reason.
 ### P23. Blocking stops new shared conversations and invites in both directions
 
 - **Source**: decision 0007 choice 3.
-- **Checked by**: `thrum-server` `groups::blocks_prevent_new_shared_conversations`;
-  `thrum-cli` e2e `blocking_stops_new_shared_conversations`. Gap: adding a
-  blocked user to an existing conversation is not tested.
+- **Checked by**: `thrum-server` `groups::blocks_prevent_new_shared_conversations`
+  covers creating a conversation from either side of a block, and the
+  blocked user redeeming the blocker's invite; `thrum-cli` e2e
+  `blocking_stops_new_shared_conversations`. Gap: the blocker redeeming the
+  blocked user's invite, and adding a blocked user to an existing
+  conversation, are not tested.
 
 ### P24. A conversation never exceeds the member cap
 
