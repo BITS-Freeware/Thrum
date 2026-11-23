@@ -289,7 +289,7 @@ pub async fn delete_account(
         .bind(user_id)
         .fetch_all(&state.db)
         .await?;
-    sqlx::query("UPDATE devices SET revoked_at = $1 WHERE user_id = $2 AND revoked_at IS NULL")
+    sqlx::query("UPDATE devices SET revoked_at = $1, token_hash = 'revoked:' || id WHERE user_id = $2 AND revoked_at IS NULL")
         .bind(accounts::now())
         .bind(user_id)
         .execute(&state.db)

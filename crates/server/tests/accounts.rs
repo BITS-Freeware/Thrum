@@ -104,3 +104,33 @@ async fn malformed_bodies_are_client_errors() {
         "malformed body should be a client error, got {status}"
     );
 }
+
+/// A signed-out or revoked device keeps no hash of its old token.
+#[tokio::test]
+async fn ended_sessions_keep_no_token_hash() {
+    let app = TestApp::spawn().await;
+    register(&app, "alice", "correct horse battery").await;
+    let laptop = login(&app, "alice", "correct horse battery", "laptop").await;
+    let phone = login(&app, "alice", "correct horse battery", "phone").await;
+    let laptop_token = laptop["token"].as_str().unwrap();
+    let phone_token = phone["token"].as_str().unwrap();
+    let logout = app.delete("/v1/sessions/current", Some(laptop_token)).await;
+    assert_eq!(logout.status(), 204);
+    let revoke = app
+        .delete(
+            &format!("/v1/devices/{}", phone["device_id"].as_str().unwrap()),
+            // The phone revokes itself; any signed-in device could.
+            Some(phone_token),
+        )
+        .await;
+    assert_eq!(revoke.status(), 204);
+    for token in [laptop_token, phone_token] {
+        let kept: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM devices WHERE token_hash = $1")
+            .bind(thrum_server::auth::token_hash(token))
+            .fetch_one(&app.state.db)
+            .await
+            .unwrap();
+        assert_eq!(kept, 0);
+        assert_eq!(app.get("/v1/devices", Some(token)).await.status(), 401);
+    }
+}

@@ -565,14 +565,9 @@ impl Client {
     ) -> Result<(), String> {
         let response = self
             .http
-            .delete(self.endpoint(&[
-                "v1",
-                "conversations",
-                conversation_id,
-                "invites",
-                invite_token,
-            ])?)
+            .post(self.endpoint(&["v1", "conversations", conversation_id, "invites", "revoke"])?)
             .bearer_auth(token)
+            .json(&serde_json::json!({ "token": invite_token }))
             .send()
             .await
             .map_err(|error| format!("request failed: {error}"))?;

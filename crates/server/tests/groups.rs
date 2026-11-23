@@ -200,11 +200,13 @@ async fn invite_roundtrip() {
         .unwrap()
         .to_string();
     let response = app
-        .delete(
-            &format!("/v1/conversations/{id}/invites/{token}"),
-            Some(alice["token"].as_str().unwrap()),
-        )
-        .await;
+        .client
+        .post(app.url(&format!("/v1/conversations/{id}/invites/revoke")))
+        .bearer_auth(alice["token"].as_str().unwrap())
+        .json(&json!({ "token": token }))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(response.status(), 204);
     let response = app
         .client
@@ -391,4 +393,63 @@ async fn blocks_prevent_new_shared_conversations() {
         .await
         .unwrap();
     assert_eq!(response.status(), 201);
+}
+
+/// Removing a member and revoking an invite are the admin's: another member
+/// gets 403, and someone outside the conversation gets the same 404 as for
+/// a conversation that does not exist.
+#[tokio::test]
+async fn only_the_admin_can_remove_members_and_revoke_invites() {
+    let app = TestApp::spawn().await;
+    let alice = user(&app, "alice").await;
+    let bob = user(&app, "bob").await;
+    let _carol = user(&app, "carol").await;
+    let eve = user(&app, "eve").await;
+    let id = conversation(&app, &alice, &["bob", "carol"]).await;
+    let response = app
+        .client
+        .post(app.url(&format!("/v1/conversations/{id}/invites")))
+        .bearer_auth(alice["token"].as_str().unwrap())
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 201);
+    let invite: String = response.json::<Value>().await.unwrap()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    for (caller, expected) in [(&bob, 403), (&eve, 404)] {
+        let token = caller["token"].as_str().unwrap();
+        let removed = app
+            .delete(
+                &format!("/v1/conversations/{id}/members/carol"),
+                Some(token),
+            )
+            .await;
+        assert_eq!(removed.status(), expected, "remove");
+        let revoked = app
+            .client
+            .post(app.url(&format!("/v1/conversations/{id}/invites/revoke")))
+            .bearer_auth(token)
+            .json(&json!({ "token": invite }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(revoked.status(), expected, "revoke");
+    }
+
+    // The invite still works, and carol is still a member.
+    let joined = app
+        .client
+        .post(app.url("/v1/invites/redeem"))
+        .bearer_auth(eve["token"].as_str().unwrap())
+        .json(&json!({ "token": invite }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(joined.status(), 200);
+    let members = joined.json::<Value>().await.unwrap()["members"].clone();
+    assert!(members.as_array().unwrap().iter().any(|m| m == "carol"));
 }

@@ -257,7 +257,9 @@ pub(crate) async fn member_ids(
     .await?)
 }
 
-/// Fail with 403 when `user_id` is not the conversation's admin.
+/// Fail unless `user_id` is the conversation's admin: 403 for a member who
+/// is not the admin, and 404 for anyone else, as for a conversation that
+/// does not exist, so a non-member cannot confirm that an id is real.
 pub(crate) async fn require_admin(
     state: &AppState,
     conversation_id: &str,
@@ -271,7 +273,20 @@ pub(crate) async fn require_admin(
             .map(|(owner,)| owner);
     match owner {
         Some(owner) if owner == user_id => Ok(()),
-        Some(_) => Err(ApiError::forbidden("not_admin")),
+        Some(_) => {
+            let member = sqlx::query_as::<_, (i64,)>(
+                "SELECT 1 FROM conversation_members WHERE conversation_id = $1 AND user_id = $2",
+            )
+            .bind(conversation_id)
+            .bind(user_id)
+            .fetch_optional(&state.db)
+            .await?;
+            if member.is_some() {
+                Err(ApiError::forbidden("not_admin"))
+            } else {
+                Err(ApiError::not_found())
+            }
+        }
         None => Err(ApiError::not_found()),
     }
 }

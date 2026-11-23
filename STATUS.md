@@ -1,6 +1,6 @@
 # Status
 
-Thrum 0.2.1 is the current version on `main` once this release is tagged.
+Thrum 0.2.1 is the current release.
 It is a security release on top of 0.2.0; see `CHANGELOG.md` and the
 repository's security advisories.
 

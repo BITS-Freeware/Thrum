@@ -80,8 +80,8 @@ pub fn routes(state: AppState) -> Router {
             post(invites::create),
         )
         .route(
-            "/v1/conversations/{conversation_id}/invites/{token}",
-            delete(invites::revoke),
+            "/v1/conversations/{conversation_id}/invites/revoke",
+            post(invites::revoke),
         )
         .route("/v1/invites/redeem", post(invites::redeem))
         .route("/v1/blocks", post(blocks::block))

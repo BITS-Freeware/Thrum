@@ -22,7 +22,16 @@ Runs the server and reads everything it stores and relays.
 
 - Cannot read message plaintext: payloads are MLS application messages and
   the server holds no group keys. *(mitigation: MLS by default, decision 0002;
-  tested in M3 by scanning the server database for plaintext.)*
+  the CLI end-to-end tests search the SQLite database and its write-ahead
+  log for the plaintext they sent.)*
+- Can read the keys and messages of web-client users by serving a modified
+  web client. The web client is served from the server's own origin, so
+  the browser runs whatever the operator sends, and the Content-Security-
+  Policy cannot help against that origin. The command-line client does not
+  depend on it. *(documented limitation. CI records the SHA-256 of the
+  built web client for every commit and release, so a build can be
+  compared with the published one, but browsers do not check it. A client
+  delivered from elsewhere would close this.)*
 - Can see and correlate metadata: rosters, sizes, timing, IP addresses.
   *(documented limitation in 0.1.0; no cover traffic or padding is planned.)*
 - Can deny, delay, drop or reorder messages. *(documented limitation; the
@@ -38,7 +47,10 @@ Runs the server and reads everything it stores and relays.
   one-time stock is capped, one last-resort package remains, and past a
   device's overall ceiling fetches get the last-resort package.
   *(mitigation: decisions 0013 and 0017; tested in the key-package and
-  resource-limit suites.)*
+  resource-limit suites.)* The last-resort package's init key is reused for
+  every group joined through it until the device tops up again, so it
+  protects several Welcomes. That is the trade-off MLS accepts for
+  last-resort packages. *(documented limitation.)*
 - Cannot silently add a device that appears after a client has already seen
   that account in any conversation. Trust on first use applies to the
   devices present the first time the account appears: the user named them,
@@ -85,6 +97,14 @@ On the path between client and server.
   hour. Wrong passwords on account deletion count toward the same limits,
   and login bodies are capped at 16 KiB, so failed logins cannot grow
   server memory. *(mitigation: tested in the rate-limit suite.)*
+- Whether a username exists is public to anyone: registration answers
+  `username_taken`, and any signed-in user can list a name's devices.
+  People add each other by name, so this is by design. The dummy hash on
+  unknown-name logins keeps login timing from revealing more, nothing
+  else. *(documented limitation.)*
+- Administrative routes answer a non-member as they would for a
+  conversation that does not exist, so an id learned elsewhere cannot be
+  confirmed. *(mitigation: tested in the member suite.)*
 - A logged-in user's load on the server is bounded by operator settings:
   members per conversation on every path that adds one, sends per device
   per minute, queued bytes per account, signed-in devices per account,
@@ -109,8 +129,13 @@ Has the device's local storage, not the server.
   cannot remove the leaf. *(mitigation: decision 0013; tested by the CLI
   device-security test, which loads the revoked device's keys and checks that
   a later ciphertext is not an application message.)*
-- Sessions are bearer tokens; revoking a device revokes its token.
-  *(mitigation: M1.)*
+- Sessions are bearer tokens; revoking a device revokes its token, and
+  its open WebSocket is closed. Tokens do not expire: one lives until
+  logout, revocation or account deletion. The server keeps only a hash of
+  a live token and drops it when the session ends. Invite tokens travel in
+  request bodies, not paths, so proxy access logs do not record them.
+  *(mitigation: M1, tested in the account and WebSocket suites; no expiry
+  is a documented limitation.)*
 
 ### 4. Malicious group member
 
@@ -125,7 +150,9 @@ A legitimate member who misbehaves.
   application message to its sender's leaf, and clients show the sender from
   that leaf's credential, not from the relay's label. A message from a leaf
   that has since been removed is ignored. *(mitigation: MLS guarantees and
-  decision 0014; tested in the core and CLI membership tests.)*
+  decision 0014. The CLI membership test relabels one member's ciphertext
+  as another's and checks that it is dropped; forging another leaf's
+  signature is left to OpenMLS and not tested here.)*
 - Cannot change who is in a group beyond what the server lists: clients merge
   a commit, or join from a welcome, only when every leaf it adds, keeps or
   names is a device the server lists for a member account, with the

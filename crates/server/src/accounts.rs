@@ -196,7 +196,14 @@ pub async fn login(
     .fetch_optional(db)
     .await?;
     let Some((user_id, stored)) = row else {
-        let _ = check_password(password, dummy_hash()).await;
+        // The dummy hash is computed on first use, which is itself an
+        // Argon2 run, so that happens off the async workers too.
+        let password = password.to_string();
+        let _ = tokio::task::spawn_blocking(move || {
+            let parsed = PasswordHash::new(dummy_hash()).map_err(|_| ApiError::internal())?;
+            verify_password(&password, &parsed)
+        })
+        .await;
         return Err(invalid());
     };
     check_password(password, &stored).await?;

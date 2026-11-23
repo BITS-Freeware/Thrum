@@ -46,6 +46,23 @@ All notable changes to Thrum are documented here. The format follows
 
 ### Fixed
 
+- Administrative routes (adding or removing members, renaming, minting or
+  revoking invites) answer someone outside the conversation with the 404
+  of a conversation that does not exist, so a non-member cannot confirm
+  that an id is real. A member who is not the admin still gets 403.
+- Revoking an invite moves the token out of the URL into the request
+  body (`POST /v1/conversations/{id}/invites/revoke`), so proxy access
+  logs do not record it. The old `DELETE .../invites/{token}` is gone.
+- A signed-out or revoked device's row no longer keeps the hash of its
+  old token (migration 0011 clears existing ones).
+- The dummy password hash for unknown names is computed off the async
+  workers, like every other Argon2 run.
+- The threat model and the self-hosting guide say that the web client
+  protects against the operator only while the operator serves an honest
+  build, that whether an account exists is public, that session tokens
+  do not expire, and that a last-resort key package is reused. PROMISES.md
+  lists these as limitations and names the tests added since 0.2.0.
+
 - Account deletion is all or nothing. It signs the account's devices out
   first and runs every database step in one transaction, so another
   device writing at the same moment can no longer leave a half-deleted
