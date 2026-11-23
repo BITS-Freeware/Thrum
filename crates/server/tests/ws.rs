@@ -66,6 +66,12 @@ async fn next_frame(ws: &mut Ws) -> Option<ServerFrame> {
     }
 }
 
+/// Wait for the marker that ends an empty queue, so what follows is live.
+/// Sending before it can deliver a message twice, live and from the queue.
+async fn caught_up(ws: &mut Ws) {
+    assert_eq!(next_frame_or_marker(ws).await, Some(ServerFrame::CaughtUp));
+}
+
 /// Next parsed server frame, the `caught_up` marker included.
 async fn next_frame_or_marker(ws: &mut Ws) -> Option<ServerFrame> {
     loop {
@@ -177,6 +183,7 @@ async fn live_delivery_and_ack_stop_queueing() {
     let bob = user(&app, "bob").await;
     let conversation = conversation_id(&app, alice["token"].as_str().expect("token")).await;
     let mut bob_ws = connect_authed(&app.base, bob["token"].as_str().expect("token")).await;
+    caught_up(&mut bob_ws).await;
 
     let message_id = send(
         &app,
@@ -384,7 +391,12 @@ async fn sender_is_not_delivered_own_message() {
 
     // But bob, connected live, does.
     let mut bob_ws = connect_authed(&app.base, bob["token"].as_str().expect("token")).await;
-    tokio::time::sleep(QUIET).await; // ensure bob registered before the send below
+    // "from me" is queued for bob; once the marker follows it, he is live.
+    match next_frame_or_marker(&mut bob_ws).await {
+        Some(ServerFrame::Message { .. }) => {}
+        other => panic!("expected the queued message, got {other:?}"),
+    }
+    caught_up(&mut bob_ws).await;
     send(
         &app,
         alice["token"].as_str().expect("token"),
@@ -392,10 +404,12 @@ async fn sender_is_not_delivered_own_message() {
         b"to bob",
     )
     .await;
-    assert!(matches!(
-        next_frame(&mut bob_ws).await,
-        Some(ServerFrame::Message { .. })
-    ));
+    match next_frame(&mut bob_ws).await {
+        Some(ServerFrame::Message { payload_base64, .. }) => {
+            assert_eq!(decode(&payload_base64), b"to bob");
+        }
+        other => panic!("expected the live message, got {other:?}"),
+    }
 }
 
 /// Decode a base64 payload back to bytes; panics on malformed input.
@@ -434,6 +448,7 @@ async fn a_second_socket_replaces_the_first_and_stays_live() {
     let token = bob["token"].as_str().unwrap();
     let mut first = connect_authed(&app.base, token).await;
     let mut second = connect_authed(&app.base, token).await;
+    caught_up(&mut second).await;
     assert!(
         closed_within(&mut first, TIMEOUT).await,
         "the replaced socket stays open"
