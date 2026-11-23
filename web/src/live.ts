@@ -16,9 +16,12 @@ export class LiveConnection {
    * welcome before the commit and the application messages that follow.
    */
   private processing: Promise<void> = Promise.resolve();
-  /** When the current socket opened, and when its last frame arrived. */
-  private openedAt: number | null = null;
-  private lastFrameAt = 0;
+  /**
+   * Whether the current connection has applied the queue the server held
+   * when it authenticated: the server's `caught_up` frame was reached in
+   * the processing chain, so every frame before it has been handled.
+   */
+  private drained = false;
 
   constructor(
     private readonly session: CryptoSession,
@@ -40,27 +43,21 @@ export class LiveConnection {
   }
 
   /**
-   * Resolves once the server's queue for this device has been applied:
-   * the connection is authenticated, every frame received is handled, and
-   * no frame has arrived for a short quiet period (the server sends the
-   * queue right after authentication). Resolves at once when offline,
-   * and gives up after a few seconds so a busy group cannot stall callers.
+   * Resolves once the server's queue for this device has been applied: the
+   * current connection's `caught_up` frame has been reached and every
+   * frame before it handled. While the socket is still connecting or
+   * reconnecting it keeps waiting. It gives up after a few seconds, so a
+   * server that cannot be reached does not stall callers.
    */
   async caughtUp(): Promise<void> {
-    const quietMs = 700;
     const giveUpAt = Date.now() + 5000;
-    for (;;) {
-      await this.processing;
+    while (!this.closed && Date.now() < giveUpAt) {
       const socket = this.socket;
-      if (!socket || socket.readyState !== WebSocket.OPEN) return;
-      const now = Date.now();
-      const quiet =
-        this.openedAt !== null &&
-        now - this.openedAt >= quietMs &&
-        now - this.lastFrameAt >= quietMs;
-      if (quiet) return;
-      if (now >= giveUpAt) return;
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      if (this.drained && socket && socket.readyState === WebSocket.OPEN) {
+        await this.processing;
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
     }
   }
 
@@ -80,7 +77,7 @@ export class LiveConnection {
     const socket = new WebSocket(url);
     this.socket = socket;
     socket.onopen = () => {
-      this.openedAt = Date.now();
+      this.drained = false;
       this.reconnectDelayMs = 1000;
       this.onChange(true);
       socket.send(this.session.authFrame());
@@ -88,13 +85,12 @@ export class LiveConnection {
     socket.onmessage = (event) => {
       if (typeof event.data !== "string") return;
       const text = event.data;
-      this.lastFrameAt = Date.now();
-      this.processing = this.processing.then(() => this.deliver(text));
+      this.processing = this.processing.then(() => this.deliver(socket, text));
     };
     socket.onclose = () => {
       if (this.socket === socket) {
         this.socket = null;
-        this.openedAt = null;
+        this.drained = false;
       }
       this.onChange(false);
       if (!this.closed) {
@@ -114,7 +110,11 @@ export class LiveConnection {
    * losing it. This method never rejects: the processing chain must
    * keep flowing for later frames.
    */
-  private async deliver(text: string): Promise<void> {
+  private async deliver(from: WebSocket, text: string): Promise<void> {
+    if (isCaughtUp(text)) {
+      if (this.socket === from) this.drained = true;
+      return;
+    }
     try {
       const ackId = await this.session.handleServerFrame(text);
       const socket = this.socket;
@@ -124,5 +124,14 @@ export class LiveConnection {
     } catch (error) {
       console.warn("frame failed", error);
     }
+  }
+}
+
+/** Whether a server frame is the `caught_up` marker that ends the queue. */
+function isCaughtUp(text: string): boolean {
+  try {
+    return (JSON.parse(text) as { type?: unknown }).type === "caught_up";
+  } catch {
+    return false;
   }
 }

@@ -10,7 +10,6 @@ use support::Server;
 use thrum_cli::api::Client;
 use thrum_cli::chat::Chat;
 use thrum_cli::session;
-use thrum_cli::ws::{RecvOptions, recv};
 
 const PASSWORD: &str = "correct horse battery";
 
@@ -30,12 +29,8 @@ fn copy_dir(from: &Path, to: &Path) {
 async fn drain(chat: &Chat) -> Vec<String> {
     let session = chat.session.clone();
     let mut lines = Vec::new();
-    recv(
+    thrum_cli::ws::drain(
         &session,
-        &RecvOptions {
-            once: false,
-            timeout_secs: 1,
-        },
         async |conversation: &str, message_id: &str, sender: &str, payload: &[u8]| {
             chat.interpret(conversation, message_id, sender, payload)
                 .await
@@ -43,7 +38,7 @@ async fn drain(chat: &Chat) -> Vec<String> {
         |line| lines.push(line),
     )
     .await
-    .expect("recv");
+    .expect("drain");
     lines
 }
 
@@ -73,7 +68,13 @@ async fn a_device_restored_from_an_old_backup_can_still_be_invited() {
     let bob = Chat::open(client.clone(), session.clone(), &bob_path).expect("open");
     let mls = dir.path().join("bob.json.mls");
     let backup = dir.path().join("backup.mls");
-    // The backup is taken before this top-up.
+    // The backup is taken before the first top-up, so it holds no key
+    // package keys at all; opening the device must not have uploaded any.
+    let stock = client
+        .key_package_stock(&session.token)
+        .await
+        .expect("stock");
+    assert_eq!((stock.count, stock.last_resort), (0, false));
     copy_dir(&mls, &backup);
     bob.top_up_key_packages().await.expect("key packages");
     drop(bob);

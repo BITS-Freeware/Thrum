@@ -200,7 +200,11 @@ impl Chat {
     pub async fn top_up_key_packages(&self) -> Result<(), String> {
         let mut withdrawn = 0usize;
         for (id, content) in self.client.own_key_packages(&self.session.token).await? {
-            if !self.crypto.holds_key_package(&content) {
+            let held = self
+                .crypto
+                .holds_key_package(&content)
+                .map_err(|error| error.to_string())?;
+            if !held {
                 self.client
                     .delete_key_package(&self.session.token, &id)
                     .await?;
@@ -607,15 +611,11 @@ impl Chat {
     }
 
     /// Process everything queued for this device before doing something
-    /// that needs a current group state (sending, removing). Short timeout:
-    /// the queue drains immediately after the WebSocket handshake.
+    /// that needs a current group state (sending, removing). Returns once
+    /// the server has sent the whole queue and every frame is applied.
     pub async fn catch_up(&self) -> Result<(), String> {
-        crate::ws::recv(
+        crate::ws::drain(
             &self.session,
-            &crate::ws::RecvOptions {
-                once: false,
-                timeout_secs: 1,
-            },
             async |conversation: &str, message_id: &str, sender: &str, payload: &[u8]| {
                 self.interpret(conversation, message_id, sender, payload)
                     .await

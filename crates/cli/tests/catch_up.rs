@@ -9,7 +9,6 @@ use support::Server;
 use thrum_cli::api::Client;
 use thrum_cli::chat::Chat;
 use thrum_cli::session;
-use thrum_cli::ws::{RecvOptions, recv};
 
 const PASSWORD: &str = "correct horse battery";
 
@@ -29,12 +28,8 @@ async fn user(client: &Client, dir: &Path, username: &str) -> Chat {
 async fn drain(chat: &Chat) -> Vec<String> {
     let session = chat.session.clone();
     let mut lines = Vec::new();
-    recv(
+    thrum_cli::ws::drain(
         &session,
-        &RecvOptions {
-            once: false,
-            timeout_secs: 1,
-        },
         async |conversation: &str, message_id: &str, sender: &str, payload: &[u8]| {
             chat.interpret(conversation, message_id, sender, payload)
                 .await
@@ -42,7 +37,7 @@ async fn drain(chat: &Chat) -> Vec<String> {
         |line| lines.push(line),
     )
     .await
-    .expect("recv");
+    .expect("drain");
     lines
 }
 

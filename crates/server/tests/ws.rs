@@ -55,8 +55,19 @@ async fn send_frame(ws: &mut Ws, frame: &ClientFrame) {
     ws.send(WsMessage::text(text)).await.expect("send frame");
 }
 
-/// Next parsed server frame, or None when the server closes the connection.
+/// Next parsed server frame, skipping the `caught_up` marker that ends the
+/// queue, or None when the server closes the connection.
 async fn next_frame(ws: &mut Ws) -> Option<ServerFrame> {
+    loop {
+        match next_frame_or_marker(ws).await {
+            Some(ServerFrame::CaughtUp) => continue,
+            other => return other,
+        }
+    }
+}
+
+/// Next parsed server frame, the `caught_up` marker included.
+async fn next_frame_or_marker(ws: &mut Ws) -> Option<ServerFrame> {
     loop {
         let message = tokio::time::timeout(TIMEOUT, ws.next())
             .await
@@ -215,6 +226,41 @@ async fn live_delivery_and_ack_stop_queueing() {
 }
 
 #[tokio::test]
+async fn the_queue_ends_with_a_caught_up_marker() {
+    let app = TestApp::spawn().await;
+    let alice = user(&app, "alice").await;
+    let bob = user(&app, "bob").await;
+    let alice_token = alice["token"].as_str().expect("token");
+    let bob_token = bob["token"].as_str().expect("token");
+
+    // Nothing queued: the marker follows authentication at once.
+    let mut bob_ws = connect_authed(&app.base, bob_token).await;
+    assert_eq!(
+        next_frame_or_marker(&mut bob_ws).await,
+        Some(ServerFrame::CaughtUp)
+    );
+    drop(bob_ws);
+
+    // Queued messages come first, then the marker, then live traffic.
+    let conversation = conversation_id(&app, alice_token).await;
+    let first = send(&app, alice_token, &conversation, b"one").await;
+    let mut bob_ws = connect_authed(&app.base, bob_token).await;
+    match next_frame_or_marker(&mut bob_ws).await {
+        Some(ServerFrame::Message { message_id, .. }) => assert_eq!(message_id, first),
+        other => panic!("expected the queued message, got {other:?}"),
+    }
+    assert_eq!(
+        next_frame_or_marker(&mut bob_ws).await,
+        Some(ServerFrame::CaughtUp)
+    );
+    let live = send(&app, alice_token, &conversation, b"two").await;
+    match next_frame_or_marker(&mut bob_ws).await {
+        Some(ServerFrame::Message { message_id, .. }) => assert_eq!(message_id, live),
+        other => panic!("expected the live message, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn catch_up_replays_undelivered_messages() {
     let app = TestApp::spawn().await;
     let alice = user(&app, "alice").await;
@@ -358,12 +404,18 @@ fn decode(encoded: &str) -> Vec<u8> {
 }
 
 /// True when the server closes the socket within `wait`; false when it is
-/// still open (nothing arrives) or a frame arrives.
+/// still open (nothing arrives) or a frame other than `caught_up` arrives.
 async fn closed_within(ws: &mut Ws, wait: Duration) -> bool {
     loop {
         match tokio::time::timeout(wait, ws.next()).await {
             Err(_) => return false,
             Ok(None) | Ok(Some(Err(_))) | Ok(Some(Ok(WsMessage::Close(_)))) => return true,
+            Ok(Some(Ok(WsMessage::Text(text))))
+                if serde_json::from_str::<ServerFrame>(&text).ok()
+                    == Some(ServerFrame::CaughtUp) =>
+            {
+                continue;
+            }
             Ok(Some(Ok(WsMessage::Text(_)))) => return false,
             Ok(Some(Ok(_))) => continue,
         }

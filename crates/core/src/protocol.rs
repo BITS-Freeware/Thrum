@@ -34,6 +34,11 @@ pub enum ServerFrame {
     },
     /// Reply to an [`ClientFrame::Ack`], sent after the server recorded it.
     AckOk { message_id: String },
+    /// Every message that was queued when the connection authenticated has
+    /// been sent. Later frames are live. A client that needs a current
+    /// group state before acting waits for this and for its frames to be
+    /// applied.
+    CaughtUp,
 }
 
 /// Encode an opaque payload as standard base64.
@@ -56,6 +61,16 @@ mod tests {
         assert_eq!(
             decode_payload(&encode_payload(bytes)).as_deref(),
             Some(&bytes[..])
+        );
+    }
+
+    #[test]
+    fn the_end_of_the_queue_is_a_bare_tag() {
+        let json = serde_json::to_string(&ServerFrame::CaughtUp).expect("serialize");
+        assert_eq!(json, r#"{"type":"caught_up"}"#);
+        assert_eq!(
+            serde_json::from_str::<ServerFrame>(&json).expect("parse"),
+            ServerFrame::CaughtUp
         );
     }
 

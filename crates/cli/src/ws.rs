@@ -30,6 +30,34 @@ pub struct RecvOptions {
 pub async fn recv(
     session: &Session,
     options: &RecvOptions,
+    interpret: impl AsyncFnMut(&str, &str, &str, &[u8]) -> Option<String>,
+    emit: impl FnMut(String),
+) -> Result<(), String> {
+    run(session, options, false, interpret, emit).await
+}
+
+/// How long [`drain`] waits for the server to finish sending the queue.
+const DRAIN_TIMEOUT_SECS: u64 = 10;
+
+/// Apply everything queued for this device, then return: once the server
+/// says the queue is sent and has confirmed every acknowledgement. Use this
+/// before anything that needs a current group state.
+pub async fn drain(
+    session: &Session,
+    interpret: impl AsyncFnMut(&str, &str, &str, &[u8]) -> Option<String>,
+    emit: impl FnMut(String),
+) -> Result<(), String> {
+    let options = RecvOptions {
+        once: false,
+        timeout_secs: DRAIN_TIMEOUT_SECS,
+    };
+    run(session, &options, true, interpret, emit).await
+}
+
+async fn run(
+    session: &Session,
+    options: &RecvOptions,
+    until_caught_up: bool,
     mut interpret: impl AsyncFnMut(&str, &str, &str, &[u8]) -> Option<String>,
     mut emit: impl FnMut(String),
 ) -> Result<(), String> {
@@ -48,7 +76,12 @@ pub async fn recv(
     let deadline = tokio::time::Instant::now() + Duration::from_secs(options.timeout_secs);
     let mut seen = HashSet::new();
     let mut awaiting_ack: Option<String> = None;
+    let mut unconfirmed = HashSet::new();
+    let mut caught_up = false;
     loop {
+        if until_caught_up && caught_up && unconfirmed.is_empty() {
+            return Ok(());
+        }
         let incoming = tokio::time::timeout_at(deadline, source.next()).await;
         match incoming {
             Err(_elapsed) => return Ok(()), // quiet for the whole timeout
@@ -88,15 +121,20 @@ pub async fn recv(
                             },
                         )
                         .await?;
+                        if until_caught_up {
+                            unconfirmed.insert(message_id.clone());
+                        }
                         if options.once {
                             awaiting_ack = Some(message_id);
                         }
                     }
                     ServerFrame::AckOk { message_id } => {
+                        unconfirmed.remove(&message_id);
                         if options.once && awaiting_ack.as_deref() == Some(message_id.as_str()) {
                             return Ok(());
                         }
                     }
+                    ServerFrame::CaughtUp => caught_up = true,
                 }
             }
             Ok(Some(Ok(_))) => {} // binary, ping and pong frames

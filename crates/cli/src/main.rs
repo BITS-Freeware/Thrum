@@ -305,12 +305,8 @@ async fn run(cli: &Cli, base: &str) -> Result<(), String> {
             // changes before applying a commit already waiting would split
             // the group.
             let mut shown = 0usize;
-            recv(
+            thrum_cli::ws::drain(
                 &chat.session,
-                &RecvOptions {
-                    once: false,
-                    timeout_secs: 1,
-                },
                 async |conversation: &str, message_id: &str, sender: &str, payload: &[u8]| {
                     chat.interpret(conversation, message_id, sender, payload)
                         .await

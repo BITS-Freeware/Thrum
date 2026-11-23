@@ -12,6 +12,10 @@ All notable changes to Thrum are documented here. The format follows
   the image and the Compose file use it as their health check.
 - The server prints its effective configuration at startup, with the S3
   secret shown only as set or unset.
+- After authentication the WebSocket sends a `caught_up` frame once every
+  queued message has been sent. Clients wait for it, and for the frames
+  before it to be applied, before they change a group. Clients that do
+  not know the frame ignore it.
 
 ### Changed
 

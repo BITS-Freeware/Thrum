@@ -385,19 +385,20 @@ impl DeviceCrypto {
     /// own key packages, so a Welcome built on it could be opened. A device
     /// restored from an older copy of its state does not hold the keys of
     /// packages it uploaded after that copy was taken. Bytes that are not a
-    /// valid key package are not held.
-    pub fn holds_key_package(&self, package: &[u8]) -> bool {
-        let held = guard_panics(|| {
+    /// valid key package are not held. Only a failure to read the key store
+    /// is an error, so a caller never withdraws a package it might hold.
+    pub fn holds_key_package(&self, package: &[u8]) -> Result<bool, MlsError> {
+        let hash_ref = guard_panics(|| {
             let key_package = KeyPackageIn::tls_deserialize_exact_bytes(package)
                 .map_err(other)?
                 .validate(self.provider.crypto(), ProtocolVersion::Mls10)
                 .map_err(other)?;
-            let hash_ref = key_package
-                .hash_ref(self.provider.crypto())
-                .map_err(other)?;
-            stored_key_package(self.provider.storage(), &hash_ref)
+            key_package.hash_ref(self.provider.crypto()).map_err(other)
         });
-        matches!(held, Ok(true))
+        match hash_ref {
+            Ok(hash_ref) => stored_key_package(self.provider.storage(), &hash_ref),
+            Err(_) => Ok(false),
+        }
     }
 
     /// A fresh one-time key package for this device.
@@ -886,18 +887,22 @@ mod tests {
         let backup = bob.to_json().unwrap();
         let late = bob.new_key_package().unwrap();
         let last_resort = bob.new_last_resort_key_package().unwrap();
-        assert!(bob.holds_key_package(&early));
-        assert!(bob.holds_key_package(&late));
-        assert!(bob.holds_key_package(&last_resort));
+        assert!(bob.holds_key_package(&early).unwrap());
+        assert!(bob.holds_key_package(&late).unwrap());
+        assert!(bob.holds_key_package(&last_resort).unwrap());
 
         let restored = DeviceCrypto::from_json(&backup).unwrap();
-        assert!(restored.holds_key_package(&early));
-        assert!(!restored.holds_key_package(&late));
-        assert!(!restored.holds_key_package(&last_resort));
+        assert!(restored.holds_key_package(&early).unwrap());
+        assert!(!restored.holds_key_package(&late).unwrap());
+        assert!(!restored.holds_key_package(&last_resort).unwrap());
 
         let carol = device("carol", 1);
-        assert!(!restored.holds_key_package(&carol.new_key_package().unwrap()));
-        assert!(!restored.holds_key_package(b"not a key package"));
+        assert!(
+            !restored
+                .holds_key_package(&carol.new_key_package().unwrap())
+                .unwrap()
+        );
+        assert!(!restored.holds_key_package(b"not a key package").unwrap());
     }
 
     /// A server roster listing these devices with their keys bound.
