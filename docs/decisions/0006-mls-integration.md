@@ -48,6 +48,11 @@ decision here is how Thrum uses it, not which library to use.
    /v1/key-packages/count` for the caller's own device). Fetching consumes
    one-time packages. Decision 0013 requires a session for that fetch, caps
    the one-time stock, and keeps one last-resort package that is not deleted.
+   Before each top-up a device lists its own stored packages (`GET
+   /v1/key-packages`) and withdraws any it cannot open (`DELETE
+   /v1/key-packages/{id}`). That happens after its state was restored from
+   a copy taken before its last top-up; a Welcome built on such a package
+   could never be read.
 8. **Tolerant receive.** Clients drop MLS messages they cannot process (old
    epochs, messages from before they joined, welcomes meant for another
    device, duplicates). This is required because the relay fan-out and MLS

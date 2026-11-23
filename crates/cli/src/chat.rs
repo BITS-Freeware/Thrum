@@ -192,7 +192,27 @@ impl Chat {
 
     /// Upload key packages until the server holds a healthy stock, including
     /// one last-resort package that survives a drain.
+    ///
+    /// Packages the server holds that this device cannot open are withdrawn
+    /// first. That happens after the state file is restored from a copy
+    /// taken before the last top-up: a Welcome built on such a package
+    /// could never be read, so the device would miss the conversation.
     pub async fn top_up_key_packages(&self) -> Result<(), String> {
+        let mut withdrawn = 0usize;
+        for (id, content) in self.client.own_key_packages(&self.session.token).await? {
+            if !self.crypto.holds_key_package(&content) {
+                self.client
+                    .delete_key_package(&self.session.token, &id)
+                    .await?;
+                withdrawn += 1;
+            }
+        }
+        if withdrawn > 0 {
+            crate::errln!(
+                "note: withdrew {withdrawn} key package(s) this device can no longer open \
+                 (its state was restored from an older copy)"
+            );
+        }
         let stock = self.client.key_package_stock(&self.session.token).await?;
         if !stock.last_resort {
             let package = self

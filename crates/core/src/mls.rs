@@ -89,6 +89,19 @@ fn guard_panics<T>(work: impl FnOnce() -> Result<T, MlsError>) -> Result<T, MlsE
     })
 }
 
+/// Whether `storage` holds the bundle (private keys included) of the key
+/// package `hash_ref` names. The bound brings the storage methods into
+/// scope without a direct dependency on `openmls_traits`.
+fn stored_key_package<S: openmls::storage::StorageProvider>(
+    storage: &S,
+    hash_ref: &KeyPackageRef,
+) -> Result<bool, MlsError> {
+    let bundle: Option<KeyPackageBundle> = storage
+        .key_package(hash_ref)
+        .map_err(|error| MlsError::Other(format!("{error:?}")))?;
+    Ok(bundle.is_some())
+}
+
 /// A MLS group member as Thrum sees it: the credential identity string.
 pub fn member_identity(credential: &Credential) -> Result<String, MlsError> {
     if credential.credential_type() != CredentialType::Basic {
@@ -366,6 +379,25 @@ impl DeviceCrypto {
         let mut with_self = server.clone();
         with_self.add_device(self.identity(), None);
         check_commit(&with_self, &changes)
+    }
+
+    /// Whether this device holds the private keys for `package`, one of its
+    /// own key packages, so a Welcome built on it could be opened. A device
+    /// restored from an older copy of its state does not hold the keys of
+    /// packages it uploaded after that copy was taken. Bytes that are not a
+    /// valid key package are not held.
+    pub fn holds_key_package(&self, package: &[u8]) -> bool {
+        let held = guard_panics(|| {
+            let key_package = KeyPackageIn::tls_deserialize_exact_bytes(package)
+                .map_err(other)?
+                .validate(self.provider.crypto(), ProtocolVersion::Mls10)
+                .map_err(other)?;
+            let hash_ref = key_package
+                .hash_ref(self.provider.crypto())
+                .map_err(other)?;
+            stored_key_package(self.provider.storage(), &hash_ref)
+        });
+        matches!(held, Ok(true))
     }
 
     /// A fresh one-time key package for this device.
@@ -845,6 +877,27 @@ mod tests {
 
     fn device(user: &str, n: u8) -> DeviceCrypto {
         DeviceCrypto::generate(format!("{user}#device-{n}"))
+    }
+
+    #[test]
+    fn a_restored_device_knows_which_of_its_key_packages_it_can_open() {
+        let bob = device("bob", 1);
+        let early = bob.new_key_package().unwrap();
+        let backup = bob.to_json().unwrap();
+        let late = bob.new_key_package().unwrap();
+        let last_resort = bob.new_last_resort_key_package().unwrap();
+        assert!(bob.holds_key_package(&early));
+        assert!(bob.holds_key_package(&late));
+        assert!(bob.holds_key_package(&last_resort));
+
+        let restored = DeviceCrypto::from_json(&backup).unwrap();
+        assert!(restored.holds_key_package(&early));
+        assert!(!restored.holds_key_package(&late));
+        assert!(!restored.holds_key_package(&last_resort));
+
+        let carol = device("carol", 1);
+        assert!(!restored.holds_key_package(&carol.new_key_package().unwrap()));
+        assert!(!restored.holds_key_package(b"not a key package"));
     }
 
     /// A server roster listing these devices with their keys bound.

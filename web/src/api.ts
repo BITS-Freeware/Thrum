@@ -114,6 +114,21 @@ export class Api {
     );
   }
 
+  /** The key packages the server holds for this device (content base64). */
+  async ownKeyPackages(): Promise<{ id: string; content: string }[]> {
+    const body = await this.expectJson<{ packages: { id: string; content: string }[] }>(
+      await this.call("GET", "/v1/key-packages"),
+    );
+    return body.packages ?? [];
+  }
+
+  /** Withdraw one of this device's stored key packages; one already gone is fine. */
+  async deleteKeyPackage(id: string): Promise<void> {
+    const response = await this.call("DELETE", `/v1/key-packages/${encodeURIComponent(id)}`);
+    if (response.status === 404) return;
+    await this.expectOk(response);
+  }
+
   async keyPackageStock(): Promise<{ count: number; lastResort: boolean }> {
     const body = await this.expectJson<{ count: number; last_resort?: boolean }>(
       await this.call("GET", "/v1/key-packages/count"),

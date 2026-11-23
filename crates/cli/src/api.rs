@@ -355,6 +355,55 @@ impl Client {
         })
     }
 
+    /// The key packages the server holds for the caller's device, as
+    /// `(id, content)`, the last-resort one included.
+    pub async fn own_key_packages(&self, token: &str) -> Result<Vec<(String, Vec<u8>)>, String> {
+        use base64::Engine as _;
+        let response = self
+            .http
+            .get(self.endpoint(&["v1", "key-packages"])?)
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|error| format!("request failed: {error}"))?;
+        let response = Self::checked(response).await?;
+        let body: Value = response
+            .json()
+            .await
+            .map_err(|error| format!("bad key package list: {error}"))?;
+        let packages = body["packages"]
+            .as_array()
+            .ok_or_else(|| "server sent no key package list".to_string())?;
+        packages
+            .iter()
+            .map(|package| {
+                let id = package["id"]
+                    .as_str()
+                    .ok_or_else(|| "key package without an id".to_string())?;
+                let content = base64::engine::general_purpose::STANDARD
+                    .decode(package["content"].as_str().unwrap_or_default())
+                    .map_err(|error| format!("bad key package content: {error}"))?;
+                Ok((id.to_string(), content))
+            })
+            .collect()
+    }
+
+    /// Withdraw one of the caller's device's stored key packages. A package
+    /// that is already gone (someone fetched it meanwhile) is not an error.
+    pub async fn delete_key_package(&self, token: &str, id: &str) -> Result<(), String> {
+        let response = self
+            .http
+            .delete(self.endpoint(&["v1", "key-packages", id])?)
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|error| format!("request failed: {error}"))?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(());
+        }
+        Self::checked(response).await.map(|_| ())
+    }
+
     /// Upload the device's last-resort key package. The server keeps it and
     /// serves it again after the one-time stock is empty.
     pub async fn upload_last_resort_key_package(

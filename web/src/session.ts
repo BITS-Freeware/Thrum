@@ -152,9 +152,19 @@ export class CryptoSession {
     await saveDeviceJson(this.session.username, this.device.toJSON());
   }
 
-  /** Keep at least `keyPackageTarget` one-time packages, plus one last-resort package. */
+  /**
+   * Keep at least `keyPackageTarget` one-time packages, plus one last-resort
+   * package. Packages the server holds that this device cannot open (its
+   * state was restored from an older copy) are withdrawn first, because a
+   * welcome built on one could never be read.
+   */
   async topUpKeyPackages(): Promise<void> {
     if (!this.device) throw new Error("not logged in");
+    for (const stored of await this.api.ownKeyPackages()) {
+      if (!this.device.holds_key_package(decodePayload(stored.content))) {
+        await this.api.deleteKeyPackage(stored.id);
+      }
+    }
     const stock = await this.api.keyPackageStock();
     if (!stock.lastResort) {
       await this.api.uploadKeyPackage(this.device.new_last_resort_key_package(), true);

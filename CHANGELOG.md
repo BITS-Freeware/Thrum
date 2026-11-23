@@ -63,6 +63,11 @@ All notable changes to Thrum are documented here. The format follows
   its next sync could commit a stale change and split the group into
   members who could no longer read each other. The command-line client's
   `recv` also shows what was queued before it syncs.
+- A device whose state was restored from a copy taken before its last
+  key-package top-up can be invited again. Before each top-up it withdraws
+  the packages the server holds that it can no longer open, through the
+  new `GET /v1/key-packages` and `DELETE /v1/key-packages/{id}`, so the
+  next inviter gets one it can read instead of a Welcome it drops.
 - The server stops cleanly on SIGTERM or Ctrl-C: it finishes open
   requests, closes the database and writes the SQLite write-ahead log back
   into the database file, so a copy of `thrum.sqlite` after a stop holds

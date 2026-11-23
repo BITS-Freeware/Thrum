@@ -45,7 +45,11 @@ pub fn routes(state: AppState) -> Router {
             "/v1/devices/{device_id}/key-package",
             get(keypackages::fetch),
         )
-        .route("/v1/key-packages", post(keypackages::upload))
+        .route(
+            "/v1/key-packages",
+            get(keypackages::list_own).post(keypackages::upload),
+        )
+        .route("/v1/key-packages/{id}", delete(keypackages::delete_own))
         .route("/v1/key-packages/count", get(keypackages::count))
         .route(
             "/v1/users/{username}/key-package-devices",
