@@ -43,6 +43,33 @@ impl Server {
     }
 }
 
+impl Server {
+    /// Everything the server's SQLite database holds right now: the main
+    /// file plus its write-ahead log. The server runs SQLite in WAL mode, so
+    /// while it is running most rows live only in the `-wal` file, and
+    /// reading the main file alone finds nothing. `known` is a value the
+    /// test knows the server stored (a username, say); the scan fails if it
+    /// is missing, so a plaintext search can never pass by reading the
+    /// wrong file.
+    pub fn stored_bytes(&self, known: &str) -> Vec<u8> {
+        let mut bytes = std::fs::read(&self.db_path).expect("read db");
+        let mut wal = self.db_path.clone().into_os_string();
+        wal.push("-wal");
+        // The log may be absent after a checkpoint; any other read error
+        // must fail the test rather than skip the rows that live there.
+        match std::fs::read(&wal) {
+            Ok(log) => bytes.extend_from_slice(&log),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("read {}: {error}", wal.to_string_lossy()),
+        }
+        assert!(
+            bytes.windows(known.len()).any(|w| w == known.as_bytes()),
+            "the database scan did not find {known:?}, so it cannot see stored rows"
+        );
+        bytes
+    }
+}
+
 /// Run the thrum binary.
 pub fn run_cli(args: &[&str]) -> std::process::Output {
     std::process::Command::new(env!("CARGO_BIN_EXE_thrum"))
