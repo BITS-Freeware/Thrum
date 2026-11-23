@@ -1,0 +1,12 @@
+# Propose updates to the pinned base image digests (Dockerfile) and the
+# PostgreSQL image (docker-compose.yml).
+version: 2
+updates:
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule:
+      interval: weekly

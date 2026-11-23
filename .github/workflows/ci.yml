@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
 
 jobs:
@@ -61,6 +62,19 @@ jobs:
       - name: Typecheck and build the web client
         run: npm run build
         working-directory: web
+      - name: Record the shipped web client's hashes
+        # The wasm glue and the built files are what browsers run beside the
+        # keys; keep their hashes with each commit and release tag.
+        run: |
+          {
+            sha256sum web/src/wasm/thrum_wasm.js web/src/wasm/thrum_wasm_bg.wasm
+            find web/dist -type f -print0 | sort -z | xargs -0 sha256sum
+          } | tee web-client-sha256.txt
+          { echo '```'; cat web-client-sha256.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-client-sha256
+          path: web-client-sha256.txt
       - name: Build the server binary
         run: cargo build -p thrum-server
       - name: Install Playwright browsers

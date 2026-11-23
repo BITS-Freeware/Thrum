@@ -42,7 +42,7 @@ services:
   # server to PostgreSQL. The database lives in a named volume; the
   # credentials below are for the private compose network only.
   postgres:
-    image: postgres:17
+    image: postgres:17@sha256:223efeb196329b55b3b9a13db144956411dbc18e727e59f681c3e0aede6475cf
     profiles: ["postgres"]
     environment:
       POSTGRES_USER: thrum

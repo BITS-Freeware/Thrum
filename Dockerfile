@@ -2,21 +2,25 @@
 # small image that serves both. The server's API, WebSocket included, lives
 # under /v1; the web client is static files for everything else
 # (THRUM_WEB_DIR).
+#
+# Base images are pinned by digest and every cargo step uses --locked, so a
+# rebuild of the same commit compiles the same code into the JavaScript and
+# wasm the browser runs. Dependabot proposes digest updates.
 
-FROM rust:1.91.0-slim-bookworm AS wasm
+FROM rust:1.91.0-slim-bookworm@sha256:81c97592d519ba7397e8adccb0345fb5a91965c0a44b82af83bd1ef06c36cef5 AS wasm
 WORKDIR /src
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    cargo install wasm-bindgen-cli --version 0.2.130
+    cargo install --locked wasm-bindgen-cli --version 0.2.130
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
 COPY .cargo .cargo
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release -p thrum-wasm --target wasm32-unknown-unknown \
+    cargo build --locked --release -p thrum-wasm --target wasm32-unknown-unknown \
     && wasm-bindgen --target web --out-dir /out \
          target/wasm32-unknown-unknown/release/thrum_wasm.wasm
 
-FROM node:22-alpine AS web
+FROM node:22-alpine@sha256:1314fb30ec37592d5845e5a160d522c0e680972aa534549940b8d73bde88481a AS web
 WORKDIR /src/web
 RUN --mount=type=bind,source=web/package.json,target=package.json \
     --mount=type=bind,source=web/package-lock.json,target=package-lock.json \
@@ -26,17 +30,17 @@ COPY web ./
 COPY --link --from=wasm /out/thrum_wasm.js /out/thrum_wasm.d.ts /out/thrum_wasm_bg.wasm /out/thrum_wasm_bg.wasm.d.ts ./src/wasm/
 RUN npm run build
 
-FROM rust:1.91.0-slim-bookworm AS server
+FROM rust:1.91.0-slim-bookworm@sha256:81c97592d519ba7397e8adccb0345fb5a91965c0a44b82af83bd1ef06c36cef5 AS server
 WORKDIR /src
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
 COPY .cargo .cargo
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release -p thrum-server \
+    cargo build --locked --release -p thrum-server \
     && cp target/release/thrum-server /usr/local/bin/thrum-server
 
-FROM debian:bookworm-slim AS runtime
+FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS runtime
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update \

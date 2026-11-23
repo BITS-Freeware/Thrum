@@ -5,8 +5,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 rustup target add wasm32-unknown-unknown
-cargo install wasm-bindgen-cli --version 0.2.130
-cargo build --release -p thrum-wasm --target wasm32-unknown-unknown
+cargo install --locked wasm-bindgen-cli --version 0.2.130
+cargo build --locked --release -p thrum-wasm --target wasm32-unknown-unknown
 mkdir -p web/src/wasm
 wasm-bindgen --target web --out-dir web/src/wasm \
   target/wasm32-unknown-unknown/release/thrum_wasm.wasm

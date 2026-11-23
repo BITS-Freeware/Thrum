@@ -30,6 +30,12 @@ All notable changes to Thrum are documented here. The format follows
   note instead of the full warning, which now appears only when an
   operator chose a non-loopback address.
 
+- The image's base images are pinned by digest, and every cargo step in
+  the image and in `scripts/build-wasm.sh` uses `--locked`, so a rebuild
+  compiles the same code into the web client's JavaScript and wasm.
+  Dependabot proposes digest updates, and CI records the SHA-256 of the
+  wasm glue and the built web client for every commit and release tag.
+
 ### Fixed
 
 - The server no longer prints the database password. The URL it logs has
