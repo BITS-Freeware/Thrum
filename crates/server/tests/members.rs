@@ -89,7 +89,9 @@ async fn only_the_admin_can_add_members() {
         .unwrap()
         .into();
 
-    // Carol is neither admin nor member: adding herself must fail.
+    // Carol is neither admin nor member: adding herself must fail, and the
+    // answer is the one for a conversation that does not exist, so she
+    // learns nothing about the id.
     let response = app
         .client
         .post(app.url(&format!("/v1/conversations/{id}/members")))
@@ -98,7 +100,23 @@ async fn only_the_admin_can_add_members() {
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), 403);
+    assert_eq!(response.status(), 404);
+    let unknown = app
+        .client
+        .post(app.url(&format!(
+            "/v1/conversations/{}/members",
+            uuid::Uuid::new_v4()
+        )))
+        .bearer_auth(carol["token"].as_str().unwrap())
+        .json(&json!({"members": ["carol"]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unknown.status(), 404);
+    assert_eq!(
+        response.text().await.unwrap(),
+        unknown.text().await.unwrap()
+    );
 
     // Bob, a member but not the admin, cannot add carol either.
     let response = app

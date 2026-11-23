@@ -96,14 +96,18 @@ pub async fn create(
     ))
 }
 
-/// `DELETE /v1/conversations/{conversation_id}/invites/{token}`: revoke an
-/// invite token. Admin only; revoking an unknown or already-revoked token
-/// is still 204 so clients cannot probe which tokens existed.
+/// `POST /v1/conversations/{conversation_id}/invites/revoke` with
+/// `{"token": ...}`: revoke an invite token. Admin only; revoking an
+/// unknown or already-revoked token is still 204 so clients cannot probe
+/// which tokens existed. The token travels in the body, not the path, so
+/// proxy access logs do not record it.
 pub async fn revoke(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path((conversation_id, token)): Path<(String, String)>,
+    Path(conversation_id): Path<String>,
+    Json(body): Json<RedeemBody>,
 ) -> Result<StatusCode, ApiError> {
+    let token = body.token;
     let authed = auth::authenticate(&state, &headers).await?;
     require_admin(&state, &conversation_id, authed.user_id).await?;
     sqlx::query(

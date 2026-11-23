@@ -34,6 +34,10 @@ All notable changes to Thrum are documented here. The format follows
   note instead of the full warning, which now appears only when an
   operator chose a non-loopback address.
 
+- `object_store` moves to 0.14 and `url` to 2.5.9, which clears the
+  advisories on `quick-xml` (S3 responses) and `url`. `deny.toml` records
+  why each remaining advisory does not reach Thrum, and CI runs
+  `cargo deny check` (advisories, licenses, bans, sources).
 - The image's base images are pinned by digest, and every cargo step in
   the image and in `scripts/build-wasm.sh` uses `--locked`, so a rebuild
   compiles the same code into the web client's JavaScript and wasm.
@@ -41,6 +45,27 @@ All notable changes to Thrum are documented here. The format follows
   wasm glue and the built web client for every commit and release tag.
 
 ### Fixed
+
+- Administrative routes (adding or removing members, renaming, minting or
+  revoking invites) answer someone outside the conversation with the 404
+  of a conversation that does not exist, so a non-member cannot confirm
+  that an id is real. A member who is not the admin still gets 403.
+- Revoking an invite moves the token out of the URL into the request
+  body (`POST /v1/conversations/{id}/invites/revoke`), so proxy access
+  logs do not record it. The old `DELETE .../invites/{token}` is gone.
+- A signed-out or revoked device's row no longer keeps the hash of its
+  old token (migration 0011 clears existing ones).
+- `thrum-server healthcheck` dials the address in `THRUM_BIND` (loopback
+  for a wildcard bind), so a server bound to one specific address is no
+  longer reported unhealthy. The Compose file gives the read-only
+  container a small `/tmp` for SQLite's temporary files.
+- The dummy password hash for unknown names is computed off the async
+  workers, like every other Argon2 run.
+- The threat model and the self-hosting guide say that the web client
+  protects against the operator only while the operator serves an honest
+  build, that whether an account exists is public, that session tokens
+  do not expire, and that a last-resort key package is reused. PROMISES.md
+  lists these as limitations and names the tests added since 0.2.0.
 
 - Account deletion is all or nothing. It signs the account's devices out
   first and runs every database step in one transaction, so another

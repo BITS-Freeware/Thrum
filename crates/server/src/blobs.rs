@@ -203,6 +203,7 @@ impl S3Store {
 #[async_trait]
 impl BlobStore for S3Store {
     async fn put(&self, id: &str, data: &[u8]) -> Result<(), BlobError> {
+        use object_store::ObjectStoreExt as _;
         let loc = self.key(id);
         self.store
             .put(&loc, data.to_vec().into())
@@ -212,6 +213,7 @@ impl BlobStore for S3Store {
     }
 
     async fn get(&self, id: &str) -> Result<Option<Vec<u8>>, BlobError> {
+        use object_store::ObjectStoreExt as _;
         let loc = self.key(id);
         match self.store.get(&loc).await {
             Ok(resp) => {
@@ -227,6 +229,7 @@ impl BlobStore for S3Store {
     }
 
     async fn delete(&self, id: &str) -> Result<(), BlobError> {
+        use object_store::ObjectStoreExt as _;
         let loc = self.key(id);
         match self.store.delete(&loc).await {
             Ok(()) => Ok(()),

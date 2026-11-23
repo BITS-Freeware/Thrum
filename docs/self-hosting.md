@@ -293,5 +293,13 @@ The server stores usernames, device identities, conversation membership,
 and opaque encrypted payloads. It cannot read message contents, group
 membership changes beyond metadata, attachment contents, or message
 edits and deletions beyond metadata. Limits (attachment size, quota) and
-availability are the operator's responsibilities. See
+availability are the operator's responsibilities.
+
+That holds against the operator only while the clients are honest. The
+web client is code the operator's server sends to the browser, so an
+operator who serves a modified build can read the keys and messages of
+everyone who uses it. The command-line client does not depend on the
+server for its code. Each CI run and release records the SHA-256 of the
+web client's files in its job summary, so a build can be compared with
+the published one; browsers do not check this on their own. See
 [SECURITY.md](../SECURITY.md) and the threat model for details.

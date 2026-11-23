@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+publish.workspace = true
 description = "Thrum server: accounts, conversation membership and encrypted message relay"
 
 [[bin]]
@@ -17,7 +18,7 @@ async-trait = "0.1"
 axum.workspace = true
 futures-util.workspace = true
 thrum-core.workspace = true
-object_store = { version = "0.12", default-features = false, features = ["aws"] }
+object_store = { version = "0.14", default-features = false, features = ["aws"] }
 rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -149,7 +149,7 @@ pub async fn revoke(
     if owner.0 != authed.user_id {
         return Err(ApiError::not_found());
     }
-    sqlx::query("UPDATE devices SET revoked_at = $1 WHERE id = $2 AND revoked_at IS NULL")
+    sqlx::query("UPDATE devices SET revoked_at = $1, token_hash = 'revoked:' || id WHERE id = $2 AND revoked_at IS NULL")
         .bind(accounts::now())
         .bind(&device_id)
         .execute(&state.db)

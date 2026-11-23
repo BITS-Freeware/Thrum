@@ -142,3 +142,51 @@ fn a_database_that_never_answers_ends_startup_without_its_password() {
     assert!(all.contains("waiting for the database"), "{all}");
     assert!(started.elapsed() < Duration::from_secs(10));
 }
+
+/// The container health check dials the address the server binds, so a
+/// server bound to one specific address is still reported healthy.
+#[tokio::test]
+async fn the_health_check_dials_the_bound_address() {
+    if std::env::var("THRUM_TEST_DB_URL").is_ok() {
+        return; // about the binary, not the database
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let port = free_port();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_thrum-server"))
+        .env("THRUM_DB", dir.path().join("thrum.sqlite"))
+        .env("THRUM_BLOB_DIR", dir.path().join("blobs"))
+        .env("THRUM_PORT", port.to_string())
+        .env("THRUM_BIND", "127.0.0.2")
+        .env_remove("THRUM_WEB_DIR")
+        .env_remove("THRUM_IMAGE_BIND")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start server");
+    let health = |bind: Option<&str>| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_thrum-server"));
+        command
+            .arg("healthcheck")
+            .env("THRUM_PORT", port.to_string())
+            .env_remove("THRUM_BIND")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        if let Some(bind) = bind {
+            command.env("THRUM_BIND", bind);
+        }
+        command.status().unwrap().success()
+    };
+    let mut healthy = false;
+    for _ in 0..100 {
+        if health(Some("127.0.0.2")) {
+            healthy = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let loopback = health(None);
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(healthy, "the check never reached the bound address");
+    assert!(!loopback, "nothing listens on 127.0.0.1 here");
+}

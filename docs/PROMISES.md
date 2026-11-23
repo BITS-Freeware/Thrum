@@ -6,7 +6,7 @@ fault could break it. The point is that no document claims more than the
 tests show. When a promise has no test yet, it says so.
 
 This list was taken at `v0.2.0` (`18c997d`). Line numbers refer to that
-commit.
+commit. "Checked by" entries are kept current as tests are added.
 
 ## How to read an entry
 
@@ -102,10 +102,11 @@ is withdrawn, the entry stays with the reason.
 ### P7. No member can forge a message from another member
 
 - **Source**: docs/threat-model.md:101-103 ("exercised by M3 tests").
-- **Checked by**: Gap. No test builds a message claiming another member's
-  leaf, or alters the sender field of an application message, and checks
-  that receivers refuse it. The claim rests on OpenMLS. The threat model's
-  "exercised by M3 tests" is stronger than the tests.
+- **Checked by**: Partial. `thrum-cli` `membership::a_relabeled_message_is_dropped`
+  has the relay label one member's ciphertext as another's and checks that
+  the receiver drops it and keeps the original message. Gap: no test builds
+  a message claiming another member's leaf; that rests on OpenMLS, and the
+  threat model now says so.
 - **Could break under**: a client that shows a sender name taken from the
   decrypted payload instead of the MLS sender leaf; edit or delete
   applied by matching a username in the payload.
@@ -223,8 +224,11 @@ is withdrawn, the entry stays with the reason.
 - **Source**: docs/threat-model.md:89-90; decision 0007 choice 2;
   `crates/server/src/auth.rs:46`.
 - **Checked by**: `thrum-server` `devices::devices_list_and_revoke`,
-  `accounts::register_login_logout_roundtrip`. Gap: nothing checks that an
-  open WebSocket of a revoked device is closed.
+  `accounts::register_login_logout_roundtrip`,
+  `ws::ending_a_device_closes_its_socket` (revocation, logout and account
+  deletion close the open socket), and
+  `accounts::ended_sessions_keep_no_token_hash` (the hash of an ended
+  session's token is dropped).
 - **Could break under**: a WebSocket opened before revocation that stays
   open; a revocation racing a login.
 
@@ -256,8 +260,10 @@ is withdrawn, the entry stays with the reason.
 
 - **Source**: decision 0007 choice 1.
 - **Checked by**: `thrum-server` `groups::rename_is_admin_only`,
-  `members::only_the_admin_can_add_members`. Gap: removal and invite
-  revocation by a non-admin are not tested.
+  `members::only_the_admin_can_add_members`,
+  `groups::only_the_admin_can_remove_members_and_revoke_invites`. A member
+  who is not the admin gets 403; a non-member gets the 404 of a
+  conversation that does not exist.
 - **Could break under**: ownership transfer on account deletion (decision
   0010) leaving the wrong admin or none.
 
@@ -307,8 +313,13 @@ is withdrawn, the entry stays with the reason.
   docs/threat-model.md:28-30.
 - **Checked by**: Partial. `thrum-server` `ws::live_delivery_and_ack_stop_queueing`,
   `catch_up_replays_undelivered_messages`,
-  `sender_is_not_delivered_own_message`. Gap: no test drops, duplicates or
-  reorders frames, or restarts the server between send and ack.
+  `sender_is_not_delivered_own_message`,
+  `the_queue_ends_with_a_caught_up_marker`; `thrum-cli`
+  `catch_up::sync_after_a_missed_add_does_not_fork_the_group` (a device
+  returning after a missed add applies it before planning its own) and
+  `restore::a_device_restored_from_an_old_backup_can_still_be_invited`.
+  Gap: no test drops, duplicates or reorders frames, or restarts the
+  server between send and ack.
 - **Could break under**: a crash between storing and fan-out; an ack for a
   message the device never processed; reconnect during catch-up.
 
@@ -356,16 +367,22 @@ is withdrawn, the entry stays with the reason.
 - **Source**: decision 0010 (Deletion).
 - **Checked by**: `thrum-server` `account::delete_account_wrong_password`,
   `delete_account_removes_everything`,
-  `delete_account_transfers_ownership`.
-- **Could break under**: deletion racing a send or an upload; blob store
-  errors part way through; PostgreSQL cascade differences.
+  `delete_account_transfers_ownership`;
+  `account_deletion::deletion_while_another_device_sends_is_all_or_nothing`
+  and `deleting_an_account_removes_its_blob_objects`, on both databases;
+  `shutdown::a_deleted_account_does_not_linger_in_the_file`.
+- **Could break under**: deletion racing an upload or an invite mint;
+  PostgreSQL cascade differences.
 
 ### P33. Blobs expire after the retention period, and uploads respect size and daily quota
 
 - **Source**: decision 0008 choices 4 and 6; docs/self-hosting.md:91-93.
 - **Checked by**: `thrum-server` `blobs::sweeper_removes_expired_blobs`,
   `rejects_oversized_and_empty_blobs`, `enforces_daily_quota`,
-  `upload_reuses_are_conflicts`.
+  `upload_reuses_are_conflicts`,
+  `account_deletion::overlapping_uploads_of_one_id_keep_the_object`,
+  `resource_limits::parallel_uploads_stay_within_the_daily_quota`, and the
+  unit test `blobs::sweep_tests::failed_object_deletes_are_retried_not_forgotten`.
 - **Could break under**: concurrent uploads at the quota boundary; the day
   rolling over during an upload.
 
@@ -375,8 +392,9 @@ is withdrawn, the entry stays with the reason.
 
 - **Source**: docs/self-hosting.md:36-43 and 88; CHANGELOG.md (0.2.0,
   Security).
-- **Checked by**: Gap. The warning in `crates/server/src/main.rs` has no
-  test.
+- **Checked by**: `thrum-server`
+  `startup::the_image_default_bind_gets_a_note_and_a_chosen_one_a_warning`.
+  Gap: nothing checks the default bind address itself.
 
 ### P35. The container runs as an unprivileged user and Compose publishes on loopback only
 
@@ -426,13 +444,31 @@ that each limit is no wider than stated.
   (#17).
 - **L7.** A leaked blob id lets anyone logged in fetch that ciphertext
   (decision 0008, Consequences).
+- **L8.** Against the operator, the web client protects only while the
+  operator serves an honest build: it runs whatever the server's origin
+  sends. The CLI does not depend on this (docs/threat-model.md, curious
+  server operator; docs/self-hosting.md, "What the operator can and cannot
+  see"; #25).
+- **L9.** Whether a username exists is public: registration answers
+  `username_taken`, and any signed-in user can list a name's devices
+  (docs/threat-model.md, network attacker; #25). P17 covers login timing
+  only.
+- **L10.** Session tokens do not expire; a token lives until logout,
+  revocation or account deletion (docs/threat-model.md, stolen device).
+- **L11.** A last-resort key package's init key is reused for every group
+  joined through it until the device tops up (docs/threat-model.md,
+  curious server operator).
 
 ## Documentation corrections found while writing this list
 
-- docs/self-hosting.md:162 says WebSocket connections go to `/ws`; the
-  route is `/v1/ws`. The nginx example proxies `/`, so it works either way.
-- docs/threat-model.md:101-103 says forgery is "exercised by M3 tests";
-  see P7.
-- docs/threat-model.md:23-25 says plaintext is "tested in M3 by scanning
+All three are corrected (#25).
+
+- docs/self-hosting.md:162 said WebSocket connections go to `/ws`; the
+  route is `/v1/ws`. The nginx example proxies `/`, so it worked either way.
+- docs/threat-model.md:101-103 said forgery is "exercised by M3 tests";
+  it now names the relabeling test and leaves leaf forgery to OpenMLS. See
+  P7.
+- docs/threat-model.md:23-25 said plaintext is "tested in M3 by scanning
   the server database". Until this list was written, that scan read a file
-  that held no rows; see P1.
+  that held no rows; it now reads the database and its write-ahead log.
+  See P1.

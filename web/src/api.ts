@@ -243,8 +243,9 @@ export class Api {
   async revokeInvite(conversationId: string, inviteToken: string): Promise<void> {
     await this.expectOk(
       await this.call(
-        "DELETE",
-        `/v1/conversations/${encodeURIComponent(conversationId)}/invites/${encodeURIComponent(inviteToken)}`,
+        "POST",
+        `/v1/conversations/${encodeURIComponent(conversationId)}/invites/revoke`,
+        { json: { token: inviteToken } },
       ),
     );
   }
