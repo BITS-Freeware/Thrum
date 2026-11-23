@@ -126,7 +126,7 @@ async fn two_cli_clients_exchange_encrypted_messages() {
     assert!(got.contains("bob: hello alice"), "got: {got:?}");
 
     // The server database never saw plaintext.
-    let db = std::fs::read(&server.db_path).expect("read db");
+    let db = server.stored_bytes("alice");
     let db = String::from_utf8_lossy(&db).into_owned();
     assert!(!db.contains("hello bob"), "plaintext in server db");
     assert!(!db.contains("hello alice"), "plaintext in server db");
@@ -169,7 +169,7 @@ async fn added_member_cannot_read_earlier_messages() {
     let got = recv_until(&base, &carol, "carol can read this", 4);
     assert!(got.contains("carol can read this"));
 
-    let db = std::fs::read(&server.db_path).expect("read db");
+    let db = server.stored_bytes("alice");
     let db = String::from_utf8_lossy(&db).into_owned();
     assert!(!db.contains("the first secret"), "plaintext in server db");
 }
@@ -388,7 +388,7 @@ async fn group_names_and_invite_links_flow() {
     assert!(err.contains("404"), "revoked join err: {err:?}");
 
     // The server database never saw plaintext.
-    let db = std::fs::read(&server.db_path).expect("read db");
+    let db = server.stored_bytes("alice");
     let db = String::from_utf8_lossy(&db).into_owned();
     assert!(!db.contains("welcome carol"), "plaintext in server db");
 }
@@ -494,7 +494,7 @@ async fn edits_deletes_and_read_receipts_flow() {
     assert!(got.contains("bob read 1 message(s)"), "got: {got:?}");
 
     // The server database never saw plaintext.
-    let db = std::fs::read(&server.db_path).expect("read db");
+    let db = server.stored_bytes("alice");
     let db = String::from_utf8_lossy(&db).into_owned();
     assert!(!db.contains("first, edited"), "plaintext in server db");
     assert!(!db.contains("a reply"), "plaintext in server db");
@@ -589,7 +589,7 @@ async fn attachments_flow_end_to_end() {
 
     // The server stored only ciphertext: neither the image bytes nor the
     // file name may appear in the database.
-    let db_bytes = std::fs::read(&server.db_path).expect("read db");
+    let db_bytes = server.stored_bytes("alice");
     assert!(
         !db_bytes
             .windows(plaintext.len())
