@@ -124,10 +124,24 @@ impl BlobStore for DiskStore {
         options.write(true).create(true).truncate(true);
         #[cfg(unix)]
         options.mode(0o600);
-        let mut file = options.open(self.path(id)).await?;
-        file.write_all(data).await?;
-        file.flush().await?;
-        Ok(())
+        // Write beside the final name and rename into place, so a fetch
+        // never reads a partly written object.
+        let target = self.path(id);
+        let partial = self
+            .dir
+            .join(format!(".{id}.{}.partial", uuid::Uuid::new_v4()));
+        let written = async {
+            let mut file = options.open(&partial).await?;
+            file.write_all(data).await?;
+            file.flush().await?;
+            file.sync_all().await?;
+            tokio::fs::rename(&partial, &target).await
+        }
+        .await;
+        if written.is_err() {
+            let _ = tokio::fs::remove_file(&partial).await;
+        }
+        Ok(written?)
     }
 
     async fn get(&self, id: &str) -> Result<Option<Vec<u8>>, BlobError> {
@@ -282,21 +296,149 @@ pub async fn delete_blob_row(db: &AnyPool, id: &str) -> sqlx::Result<()> {
     Ok(())
 }
 
-/// Remove every expired blob: the row from the database and the object from
-/// storage. Returns how many blobs were removed. Missing objects count as
-/// removed; storage backends may race with the sweep.
+/// Delete `id`'s object from `store`; an object that is already gone counts
+/// as deleted.
+pub async fn delete_object(store: &dyn BlobStore, id: &str) -> Result<(), BlobError> {
+    match store.delete(id).await {
+        Ok(()) | Err(BlobError::NotFound) => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+/// Remove every expired blob: first the object from storage, then the row
+/// from the database. A row whose object the store fails to delete stays
+/// for the next sweep, so the object is never left without a row pointing
+/// at it. Also retries the objects of deleted accounts
+/// ([`purge_tombstones`]). Returns how many objects were removed.
 pub async fn sweep_expired(db: &AnyPool, store: &dyn BlobStore) -> usize {
-    let Ok(ids) = expired_blob_ids(db).await else {
+    let mut removed = 0;
+    if let Ok(ids) = expired_blob_ids(db).await {
+        for id in ids {
+            match delete_object(store, &id).await {
+                Ok(()) => {
+                    if delete_blob_row(db, &id).await.is_ok() {
+                        removed += 1;
+                    }
+                }
+                Err(error) => eprintln!(
+                    "expired {} kept for the next sweep: {}",
+                    log_ref(&id),
+                    log_error(&error, &id)
+                ),
+            }
+        }
+    }
+    removed + purge_tombstones(db, store).await
+}
+
+/// Delete the objects listed in `blob_tombstones` (their rows are already
+/// gone), dropping each tombstone once its object is gone. Failures stay
+/// listed for the next sweep. Returns how many were removed.
+pub async fn purge_tombstones(db: &AnyPool, store: &dyn BlobStore) -> usize {
+    let Ok(ids) = sqlx::query_scalar::<_, String>("SELECT id FROM blob_tombstones")
+        .fetch_all(db)
+        .await
+    else {
         return 0;
     };
     let mut removed = 0;
     for id in ids {
-        let _ = store.delete(&id).await; // already gone is fine
-        if delete_blob_row(db, &id).await.is_ok() {
-            removed += 1;
+        match delete_object(store, &id).await {
+            Ok(()) => {
+                if sqlx::query("DELETE FROM blob_tombstones WHERE id = $1")
+                    .bind(&id)
+                    .execute(db)
+                    .await
+                    .is_ok()
+                {
+                    removed += 1;
+                }
+            }
+            Err(error) => eprintln!(
+                "deleted account's {} kept for the next sweep: {}",
+                log_ref(&id),
+                log_error(&error, &id)
+            ),
         }
     }
     removed
+}
+
+#[cfg(test)]
+mod sweep_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// A store whose deletes fail until `working` is set.
+    struct FlakyStore {
+        inner: DiskStore,
+        working: AtomicBool,
+    }
+
+    #[async_trait]
+    impl BlobStore for FlakyStore {
+        async fn put(&self, id: &str, data: &[u8]) -> Result<(), BlobError> {
+            self.inner.put(id, data).await
+        }
+        async fn get(&self, id: &str) -> Result<Option<Vec<u8>>, BlobError> {
+            self.inner.get(id).await
+        }
+        async fn delete(&self, id: &str) -> Result<(), BlobError> {
+            if self.working.load(Ordering::SeqCst) {
+                self.inner.delete(id).await
+            } else {
+                Err(BlobError::S3("unavailable".into()))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_object_deletes_are_retried_not_forgotten() {
+        let dir = tempfile::tempdir().unwrap();
+        let url = dir.path().join("t.sqlite").to_string_lossy().into_owned();
+        let (db, _) = crate::db::connect(&url).await.unwrap();
+        let store = FlakyStore {
+            inner: DiskStore::new(&dir.path().join("blobs").to_string_lossy()).unwrap(),
+            working: AtomicBool::new(false),
+        };
+        sqlx::query("INSERT INTO users (username, password_hash, created_at) VALUES ('u', 'h', 0)")
+            .execute(&db)
+            .await
+            .unwrap();
+        let expired = "a".repeat(32);
+        let orphan = "b".repeat(32);
+        store.put(&expired, b"x").await.unwrap();
+        store.put(&orphan, b"y").await.unwrap();
+        sqlx::query(
+            "INSERT INTO blobs (id, uploader_id, size, expires_at, created_at)
+             SELECT $1, id, 1, 1, 0 FROM users WHERE username = 'u'",
+        )
+        .bind(&expired)
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO blob_tombstones (id, created_at) VALUES ($1, 0)")
+            .bind(&orphan)
+            .execute(&db)
+            .await
+            .unwrap();
+
+        assert_eq!(sweep_expired(&db, &store).await, 0);
+        let rows: i64 = sqlx::query_scalar(
+            "SELECT (SELECT COUNT(*) FROM blobs) + (SELECT COUNT(*) FROM blob_tombstones)",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(rows, 2, "rows must outlive a failed object delete");
+
+        store.working.store(true, Ordering::SeqCst);
+        assert_eq!(sweep_expired(&db, &store).await, 2);
+        assert!(store.get(&expired).await.unwrap().is_none());
+        assert!(store.get(&orphan).await.unwrap().is_none());
+        // Gone already counts as deleted.
+        assert!(delete_object(&store, &expired).await.is_ok());
+    }
 }
 
 #[cfg(test)]

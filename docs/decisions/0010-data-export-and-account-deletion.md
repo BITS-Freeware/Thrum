@@ -36,10 +36,20 @@ session token alone is not enough: deleting an account is the one action
 a stolen token must not be able to do quietly. Wrong password answers
 `401 invalid_credentials` and deletes nothing.
 
-Deletion removes, in foreign-key-safe order:
+Deletion first signs out every device of the account and closes their
+sockets, so no new request of the account starts. The database steps
+then run in one transaction, so a failure leaves the account as it
+was; requests of the account already in flight finish before it or fail
+after it commits (on PostgreSQL the transaction locks the account and
+device rows first). Inside the transaction it removes, in
+foreign-key-safe order:
 
-1. the user's uploaded blob objects from the blob store, then their
-   `blobs` rows — so the ciphertext bytes really leave the disk;
+1. the user's `blobs` rows, recording each id in `blob_tombstones`.
+   After the commit the server deletes the objects from the blob store
+   and drops each tombstone once the store confirms the object is gone
+   (a missing object counts). A tombstone keeps its id from being
+   claimed by a new upload, and the sweeper retries objects the store
+   failed to delete, so the ciphertext bytes really leave the disk;
 2. invites the user minted (`invites.created_by` has no cascade);
 3. messages the user's devices sent (`messages.sender_device` has no
    cascade); their delivery rows go with them. Since decision 0016,
