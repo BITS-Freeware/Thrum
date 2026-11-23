@@ -376,3 +376,75 @@ async fn a_key_package_must_be_for_the_uploading_device_and_keep_its_key() {
         .unwrap();
     assert_eq!(bound, common::device_keys(&alice).signature_key());
 }
+
+#[tokio::test]
+async fn a_device_lists_and_withdraws_only_its_own_key_packages() {
+    use base64::Engine as _;
+    let app = TestApp::spawn().await;
+    register(&app, "alice", "correct horse battery").await;
+    let alice = login(&app, "alice", "correct horse battery", "laptop").await;
+    let token = alice["token"].as_str().expect("token").to_string();
+    let one_time = key_package(&alice);
+    let last_resort = last_resort_package(&alice);
+    for (content, role) in [
+        (one_time.clone(), None),
+        (last_resort.clone(), Some("last-resort")),
+    ] {
+        let mut request = app
+            .client
+            .post(app.url("/v1/key-packages"))
+            .bearer_auth(&token)
+            .body(content);
+        if let Some(role) = role {
+            request = request.header("x-thrum-key-package-role", role);
+        }
+        assert_eq!(request.send().await.expect("upload").status(), 201);
+    }
+    register(&app, "bob", "correct horse battery").await;
+    let bob = login(&app, "bob", "correct horse battery", "phone").await;
+    let bob_token = bob["token"].as_str().expect("token");
+
+    assert_eq!(app.get("/v1/key-packages", None).await.status(), 401);
+    let listed: serde_json::Value = app
+        .get("/v1/key-packages", Some(&token))
+        .await
+        .json()
+        .await
+        .expect("json");
+    let packages = listed["packages"].as_array().expect("packages");
+    assert_eq!(packages.len(), 2);
+    let content = |index: usize| {
+        base64::engine::general_purpose::STANDARD
+            .decode(packages[index]["content"].as_str().expect("content"))
+            .expect("base64")
+    };
+    assert_eq!(content(0), one_time);
+    assert_eq!(packages[0]["last_resort"], false);
+    assert_eq!(content(1), last_resort);
+    assert_eq!(packages[1]["last_resort"], true);
+    let bobs: serde_json::Value = app
+        .get("/v1/key-packages", Some(bob_token))
+        .await
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(bobs["packages"].as_array().expect("packages").len(), 0);
+
+    let id = packages[0]["id"].as_str().expect("id");
+    let path = format!("/v1/key-packages/{id}");
+    let delete = |token: String| {
+        let request = app.client.delete(app.url(&path)).bearer_auth(token);
+        async move { request.send().await.expect("delete").status() }
+    };
+    assert_eq!(delete(bob_token.to_string()).await, 404);
+    assert_eq!(delete(token.clone()).await, 204);
+    assert_eq!(delete(token.clone()).await, 404);
+    let stock: serde_json::Value = app
+        .get("/v1/key-packages/count", Some(&token))
+        .await
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(stock["count"], 0);
+    assert_eq!(stock["last_resort"], true);
+}

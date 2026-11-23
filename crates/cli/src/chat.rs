@@ -192,7 +192,31 @@ impl Chat {
 
     /// Upload key packages until the server holds a healthy stock, including
     /// one last-resort package that survives a drain.
+    ///
+    /// Packages the server holds that this device cannot open are withdrawn
+    /// first. That happens after the state file is restored from a copy
+    /// taken before the last top-up: a Welcome built on such a package
+    /// could never be read, so the device would miss the conversation.
     pub async fn top_up_key_packages(&self) -> Result<(), String> {
+        let mut withdrawn = 0usize;
+        for (id, content) in self.client.own_key_packages(&self.session.token).await? {
+            let held = self
+                .crypto
+                .holds_key_package(&content)
+                .map_err(|error| error.to_string())?;
+            if !held {
+                self.client
+                    .delete_key_package(&self.session.token, &id)
+                    .await?;
+                withdrawn += 1;
+            }
+        }
+        if withdrawn > 0 {
+            crate::errln!(
+                "note: withdrew {withdrawn} key package(s) this device can no longer open \
+                 (its state was restored from an older copy)"
+            );
+        }
         let stock = self.client.key_package_stock(&self.session.token).await?;
         if !stock.last_resort {
             let package = self
@@ -254,6 +278,7 @@ impl Chat {
             .add_members(&self.session.token, conversation_id, members)
             .await?;
         let admit: HashSet<String> = members.iter().cloned().collect();
+        self.catch_up().await?;
         let report = self
             .sync_group(conversation_id, &all_members, &admit)
             .await?;
@@ -324,6 +349,7 @@ impl Chat {
         conversation_id: &str,
         username: &str,
     ) -> Result<Vec<u8>, String> {
+        self.catch_up().await?;
         let roster = self
             .crypto
             .group_members(conversation_id)
@@ -558,7 +584,12 @@ impl Chat {
     /// Bring every conversation in line with the server and top up this
     /// device's key package stock. New device identities are not added
     /// unless this user has trusted them (or just added that account).
+    ///
+    /// Everything queued for this device is processed first: planning
+    /// against a roster that misses a commit already waiting would commit
+    /// a second change in an old epoch and split the group.
     pub async fn sync(&self) -> Result<SyncReport, String> {
+        self.catch_up().await?;
         self.top_up_key_packages().await?;
         let mut report = SyncReport::default();
         let empty = HashSet::new();
@@ -580,15 +611,11 @@ impl Chat {
     }
 
     /// Process everything queued for this device before doing something
-    /// that needs a current group state (sending, removing). Short timeout:
-    /// the queue drains immediately after the WebSocket handshake.
+    /// that needs a current group state (sending, removing). Returns once
+    /// the server has sent the whole queue and every frame is applied.
     pub async fn catch_up(&self) -> Result<(), String> {
-        crate::ws::recv(
+        crate::ws::drain(
             &self.session,
-            &crate::ws::RecvOptions {
-                once: false,
-                timeout_secs: 1,
-            },
             async |conversation: &str, message_id: &str, sender: &str, payload: &[u8]| {
                 self.interpret(conversation, message_id, sender, payload)
                     .await

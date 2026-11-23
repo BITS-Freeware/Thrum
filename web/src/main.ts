@@ -221,8 +221,9 @@ function renderAuth(): void {
             passInput.value,
           );
         }
-        await session.sync();
+        // Connect first: sync waits for the queued frames to be applied.
         startLive();
+        await session.sync();
         window.location.hash = "#/chats";
         render();
       } catch (caught) {
@@ -820,6 +821,7 @@ function startLive(): void {
   });
   const current = live;
   session.beforeSend = () => current.idle();
+  session.beforeSync = () => current.caughtUp();
   live.start();
 }
 
@@ -873,12 +875,13 @@ void (async () => {
     session = null;
   }
   if (session) {
+    // Connect first: sync waits for the queued frames to be applied.
+    startLive();
     try {
       await session.sync();
     } catch (error) {
       console.warn("sync failed", error);
     }
-    startLive();
   }
   render();
 })();

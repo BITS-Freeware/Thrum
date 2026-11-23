@@ -244,6 +244,62 @@ pub async fn count(
     ))
 }
 
+/// `GET /v1/key-packages`: the caller's own device's stored key packages,
+/// one-time and last-resort, with their ids and content (base64). A client
+/// restored from an older copy of its state compares these with the keys
+/// it holds and deletes the ones it can no longer open.
+pub async fn list_own(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    use base64::Engine as _;
+    let authed = auth::authenticate(&state, &headers).await?;
+    let tiebreak = match state.backend {
+        crate::db::Backend::Sqlite => "kp.rowid",
+        crate::db::Backend::Postgres => "kp.seq",
+    };
+    let rows: Vec<(String, Vec<u8>, i64)> = sqlx::query_as(&format!(
+        "SELECT kp.id, kp.content, kp.last_resort FROM key_packages kp
+         JOIN devices d ON d.id = kp.device_id
+         WHERE kp.device_id = $1 AND d.revoked_at IS NULL
+         ORDER BY kp.created_at, {tiebreak}"
+    ))
+    .bind(&authed.device_id)
+    .fetch_all(&state.db)
+    .await?;
+    let packages: Vec<_> = rows
+        .into_iter()
+        .map(|(id, content, last_resort)| {
+            json!({
+                "id": id,
+                "last_resort": last_resort != 0,
+                "content": base64::engine::general_purpose::STANDARD.encode(content),
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "packages": packages })))
+}
+
+/// `DELETE /v1/key-packages/{id}`: withdraw one of the caller's own
+/// device's stored key packages. Another device's package is not found.
+pub async fn delete_own(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let authed = auth::authenticate(&state, &headers).await?;
+    let deleted = sqlx::query("DELETE FROM key_packages WHERE id = $1 AND device_id = $2")
+        .bind(&id)
+        .bind(&authed.device_id)
+        .execute(&state.db)
+        .await?
+        .rows_affected();
+    if deleted == 0 {
+        return Err(ApiError::not_found());
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// `GET /v1/users/{username}/key-package-devices`: the device ids of a user
 /// that currently have at least one unconsumed key package. Anyone adding a
 /// user to a conversation needs one key package per device.

@@ -299,10 +299,29 @@ async fn run(cli: &Cli, base: &str) -> Result<(), String> {
         Command::Recv { once, timeout } => {
             let session = load_session(&cli.state_file, base)?;
             let chat = Chat::open(client, session, &cli.state_file)?;
-            // Best effort: pull in new devices and redeemed invitations
-            // before listening, so fresh devices get their welcomes promptly.
+            // Show what is already queued, then pull in new devices and
+            // redeemed invitations before listening, so fresh devices get
+            // their welcomes promptly. The queue goes first: planning roster
+            // changes before applying a commit already waiting would split
+            // the group.
+            let mut shown = 0usize;
+            thrum_cli::ws::drain(
+                &chat.session,
+                async |conversation: &str, message_id: &str, sender: &str, payload: &[u8]| {
+                    chat.interpret(conversation, message_id, sender, payload)
+                        .await
+                },
+                |line| {
+                    shown += 1;
+                    thrum_cli::outln!("{line}");
+                },
+            )
+            .await?;
             if let Err(error) = chat.sync().await {
                 thrum_cli::errln!("note: sync failed: {error}");
+            }
+            if *once && shown > 0 {
+                return Ok(());
             }
             recv(
                 &chat.session,

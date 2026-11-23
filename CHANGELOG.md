@@ -12,6 +12,10 @@ All notable changes to Thrum are documented here. The format follows
   the image and the Compose file use it as their health check.
 - The server prints its effective configuration at startup, with the S3
   secret shown only as set or unset.
+- After authentication the WebSocket sends a `caught_up` frame once every
+  queued message has been sent. Clients wait for it, and for the frames
+  before it to be applied, before they change a group. Clients that do
+  not know the frame ignore it.
 
 ### Changed
 
@@ -58,6 +62,16 @@ All notable changes to Thrum are documented here. The format follows
   `postgres` profile the server waits for PostgreSQL's health check.
 - Blob ids no longer appear in server logs; log lines name a blob by a
   short hash of its id.
+- A device that was offline while members were added or removed applies
+  those changes before it plans its own roster change or sends. Before,
+  its next sync could commit a stale change and split the group into
+  members who could no longer read each other. The command-line client's
+  `recv` also shows what was queued before it syncs.
+- A device whose state was restored from a copy taken before its last
+  key-package top-up can be invited again. Before each top-up it withdraws
+  the packages the server holds that it can no longer open, through the
+  new `GET /v1/key-packages` and `DELETE /v1/key-packages/{id}`, so the
+  next inviter gets one it can read instead of a Welcome it drops.
 - The server stops cleanly on SIGTERM or Ctrl-C: it finishes open
   requests, closes the database and writes the SQLite write-ahead log back
   into the database file, so a copy of `thrum.sqlite` after a stop holds

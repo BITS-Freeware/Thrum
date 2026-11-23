@@ -58,6 +58,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
     let keep_older_than = now() - state.cfg.queue_ttl_seconds;
     let _ = messages::cleanup_expired(&state.db, keep_older_than).await;
     let mut cursor = None;
+    let mut complete = false;
     loop {
         let Ok((page, next)) =
             messages::undelivered_page(&state.db, state.backend, &authed.device_id, cursor).await
@@ -75,9 +76,21 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
             }
         }
         if (page.len() as i64) < messages::CATCH_UP_PAGE {
+            complete = true;
             break;
         }
         cursor = next;
+    }
+    // Only a complete catch-up is announced; after a database error the
+    // client keeps waiting and gives up on its own.
+    if complete
+        && socket
+            .send(WsMessage::text(render_server_frame(&ServerFrame::CaughtUp)))
+            .await
+            .is_err()
+    {
+        state.hub.remove(&authed.device_id, connection_id);
+        return;
     }
 
     let (mut sink, mut stream) = socket.split();

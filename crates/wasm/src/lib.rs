@@ -104,6 +104,15 @@ impl DeviceState {
             .map_err(js_error)
     }
 
+    /// Whether this device holds the private keys for one of its own key
+    /// packages. A device restored from older state does not hold those of
+    /// packages it uploaded later.
+    pub fn holds_key_package(&self, package: Uint8Array) -> Result<bool, JsValue> {
+        self.inner
+            .holds_key_package(&bytes(package))
+            .map_err(js_error)
+    }
+
     /// Validate a fetched key package and return the identity it claims.
     pub fn key_package_identity(&self, package: Uint8Array) -> Result<String, JsValue> {
         self.inner
