@@ -18,6 +18,18 @@ services:
       # Docker network so rate limits see real client addresses (see
       # docs/self-hosting.md, "TLS and reverse proxy"):
       # THRUM_TRUSTED_PROXIES: 172.16.0.0/12
+    # The entrypoint needs these three to hand /data to the thrum user and
+    # drop to it; the server itself runs with no capabilities.
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETUID, SETGID]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    pids_limit: 256
+    healthcheck:
+      test: ["CMD", "thrum-server", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
     restart: unless-stopped
 
   # Optional: `docker compose --profile postgres up -d` switches the

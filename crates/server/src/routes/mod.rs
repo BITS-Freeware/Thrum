@@ -93,7 +93,14 @@ pub fn routes(state: AppState) -> Router {
         )
         .route("/v1/blobs/{blob_id}", get(blobs::fetch))
         .route("/v1/ws", get(ws::ws_handler))
+        // An unknown API path is a JSON 404, never the web client's
+        // index.html that a static-file fallback would serve.
+        .route("/v1/{*rest}", axum::routing::any(unknown_api_path))
         .with_state(state)
+}
+
+async fn unknown_api_path() -> crate::error::ApiError {
+    crate::error::ApiError::not_found()
 }
 
 async fn healthz() -> &'static str {
