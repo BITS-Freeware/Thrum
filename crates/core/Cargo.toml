@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+publish.workspace = true
 description = "Thrum core: protocol types and client logic shared by all clients"
 
 [dependencies]

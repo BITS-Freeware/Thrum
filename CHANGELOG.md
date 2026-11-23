@@ -34,6 +34,10 @@ All notable changes to Thrum are documented here. The format follows
   note instead of the full warning, which now appears only when an
   operator chose a non-loopback address.
 
+- `object_store` moves to 0.14 and `url` to 2.5.9, which clears the
+  advisories on `quick-xml` (S3 responses) and `url`. `deny.toml` records
+  why each remaining advisory does not reach Thrum, and CI runs
+  `cargo deny check` (advisories, licenses, bans, sources).
 - The image's base images are pinned by digest, and every cargo step in
   the image and in `scripts/build-wasm.sh` uses `--locked`, so a rebuild
   compiles the same code into the web client's JavaScript and wasm.

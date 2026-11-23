@@ -1,0 +1,69 @@
+# cargo-deny configuration. CI runs `cargo deny check`.
+
+[graph]
+all-features = false
+
+[advisories]
+# Report unmaintained crates anywhere in the graph, not only direct ones.
+unmaintained = "all"
+# `cargo audit`, which reads Cargo.lock alone, also lists rsa
+# (RUSTSEC-2023-0071, via sqlx's MySQL driver) and libcrux-kem
+# (RUSTSEC-2026-0330 and -0331, via an hpke-rs backend). Both are optional
+# dependencies Thrum never enables, so they are not built.
+#
+# Advisories that remain after updating what has a fixed release. Each
+# entry says why Thrum is not exposed, or how little; remove it once the
+# dependency moves past the affected version.
+ignore = [
+    # crypto-bigint 0.5 (via p256 in OpenMLS's crypto provider): timing
+    # variability in constant-time arithmetic. Thrum's ciphersuite uses
+    # X25519 and Ed25519 only, so P-256 never touches a secret; at most it
+    # verifies a signature on a received key package, which is public data.
+    { id = "RUSTSEC-2026-0387", reason = "P-256 is never used with a secret key" },
+    # libsqlite3-sys 0.30 (bundled SQLite before 3.54): a database file
+    # opened with a crafted -wal of another page size returns uninitialized
+    # memory. The server only opens its own database file. The fix needs
+    # sqlx 0.9, which needs a newer Rust toolchain.
+    { id = "RUSTSEC-2026-0459", reason = "only the server's own database file is opened" },
+    # chrono and humantime are unmaintained; object_store depends on them.
+    { id = "RUSTSEC-2026-0543", reason = "unmaintained, no known vulnerability; via object_store" },
+    { id = "RUSTSEC-2026-0542", reason = "unmaintained, no known vulnerability; via object_store" },
+    # proc-macro-error2 is unmaintained; a build-time macro in OpenMLS's
+    # crypto dependencies.
+    { id = "RUSTSEC-2026-0173", reason = "unmaintained build-time macro; no known vulnerability" },
+]
+
+[licenses]
+# Every dependency must be available under one of these, all compatible
+# with Thrum's AGPL-3.0-or-later.
+allow = [
+    "0BSD",
+    "AGPL-3.0-or-later",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.9
+
+[bans]
+# Several crates are pulled in at two major versions by different
+# dependencies; that is reported, not refused.
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

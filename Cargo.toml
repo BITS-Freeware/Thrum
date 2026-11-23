@@ -8,6 +8,8 @@ edition = "2024"
 rust-version = "1.91"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/BITS-Freeware/Thrum"
+# Thrum ships as a server image and binaries, not as crates.
+publish = false
 
 [workspace.dependencies]
 argon2 = "0.5"
