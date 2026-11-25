@@ -7,7 +7,7 @@
 # rebuild of the same commit compiles the same code into the JavaScript and
 # wasm the browser runs. Dependabot proposes digest updates.
 
-FROM rust:1.91.0-slim-bookworm@sha256:81c97592d519ba7397e8adccb0345fb5a91965c0a44b82af83bd1ef06c36cef5 AS wasm
+FROM rust:1.99.1-slim-bookworm@sha256:f2c004e3d2d8b547e8cf7ffbc29205385f4e71d23e53e4e383065db5e9f822cd AS wasm
 WORKDIR /src
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo install --locked wasm-bindgen-cli --version 0.2.130
@@ -30,7 +30,7 @@ COPY web ./
 COPY --link --from=wasm /out/thrum_wasm.js /out/thrum_wasm.d.ts /out/thrum_wasm_bg.wasm /out/thrum_wasm_bg.wasm.d.ts ./src/wasm/
 RUN npm run build
 
-FROM rust:1.91.0-slim-bookworm@sha256:81c97592d519ba7397e8adccb0345fb5a91965c0a44b82af83bd1ef06c36cef5 AS server
+FROM rust:1.99.1-slim-bookworm@sha256:f2c004e3d2d8b547e8cf7ffbc29205385f4e71d23e53e4e383065db5e9f822cd AS server
 WORKDIR /src
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
