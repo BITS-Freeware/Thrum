@@ -877,7 +877,12 @@ impl Chat {
     }
 
     /// Turn one relay payload into a display line, applying the MLS state
-    /// changes it carries. `None` means nothing to show.
+    /// changes it carries. `Ok(None)` means nothing to show.
+    ///
+    /// `Err` means the payload could not be handled yet and must stay
+    /// queued: the server's roster could not be fetched, or the new state
+    /// could not be saved. Only `Ok` is a verdict on the payload, so only
+    /// `Ok` may be acknowledged.
     ///
     /// Welcomes and commits are checked against the server's roster of the
     /// conversation; a refused one is tried once more with a fresh roster,
@@ -894,10 +899,11 @@ impl Chat {
         message_id: &str,
         sender_username: &str,
         payload: &[u8],
-    ) -> Option<String> {
-        self.interpret_raw(conversation_id, message_id, sender_username, payload)
-            .await
-            .map(|line| crate::display::clean(&line))
+    ) -> Result<Option<String>, String> {
+        Ok(self
+            .interpret_raw(conversation_id, message_id, sender_username, payload)
+            .await?
+            .map(|line| crate::display::clean(&line)))
     }
 
     async fn interpret_raw(
@@ -906,20 +912,21 @@ impl Chat {
         message_id: &str,
         sender_username: &str,
         payload: &[u8],
-    ) -> Option<String> {
-        let envelope = decode_envelope(payload)?;
-        let data = envelope.data()?;
+    ) -> Result<Option<String>, String> {
+        let Some(envelope) = decode_envelope(payload) else {
+            return Ok(None);
+        };
+        let Some(data) = envelope.data() else {
+            return Ok(None);
+        };
         match envelope {
             Envelope::Welcome { .. } => {
                 let mut outcome = Err(String::new());
                 for refresh in [false, true] {
-                    let roster = match self.server_roster(conversation_id, refresh).await {
-                        Ok(roster) => roster,
-                        Err(error) => {
-                            crate::errln!("welcome not applied: {error}");
-                            return None;
-                        }
-                    };
+                    let roster = self
+                        .server_roster(conversation_id, refresh)
+                        .await
+                        .map_err(|error| format!("welcome not applied yet: {error}"))?;
                     outcome = self
                         .crypto
                         .process_welcome(conversation_id, &data, &roster)
@@ -931,17 +938,16 @@ impl Chat {
                 match outcome {
                     Ok(group_conversation) => {
                         // The new group state must reach disk before the
-                        // process ends, or the next run knows nothing about
-                        // the join.
-                        if let Err(error) = self.persist() {
-                            crate::errln!("warning: could not save MLS state: {error}");
-                        }
+                        // welcome is acknowledged, or the next run knows
+                        // nothing about the join.
+                        self.persist()
+                            .map_err(|error| format!("could not save MLS state: {error}"))?;
                         self.pin_group_keys(&group_conversation);
-                        Some(format!("joined {group_conversation}"))
+                        Ok(Some(format!("joined {group_conversation}")))
                     }
                     Err(error) => {
                         crate::errln!("welcome not applied: {error}"); // stale, foreign or forged
-                        None
+                        Ok(None)
                     }
                 }
             }
@@ -952,13 +958,10 @@ impl Chat {
                     .unwrap_or_default();
                 let mut incoming = Ok(Incoming::Ignored);
                 for refresh in [false, true] {
-                    let roster = match self.server_roster(conversation_id, refresh).await {
-                        Ok(roster) => roster,
-                        Err(error) => {
-                            crate::errln!("message not applied: {error}");
-                            return None;
-                        }
-                    };
+                    let roster = self
+                        .server_roster(conversation_id, refresh)
+                        .await
+                        .map_err(|error| format!("message not applied yet: {error}"))?;
                     incoming = self
                         .crypto
                         .process_incoming(conversation_id, &data, &roster);
@@ -968,34 +971,41 @@ impl Chat {
                 }
                 match incoming {
                     Ok(Incoming::Application { sender, payload }) => {
-                        let (username, _) = split_identity(&sender)?;
+                        // Decrypting moved the group's key schedule on;
+                        // save it before the message is acknowledged.
+                        self.persist()
+                            .map_err(|error| format!("could not save MLS state: {error}"))?;
+                        let Some((username, _)) = split_identity(&sender) else {
+                            return Ok(None);
+                        };
                         if !username.eq_ignore_ascii_case(sender_username) {
                             crate::errln!(
                                 "warning: dropped a message labeled {sender_username} \
                                  that {sender} sent"
                             );
-                            return None;
+                            return Ok(None);
                         }
-                        self.apply_app_message(conversation_id, message_id, username, &payload)
+                        Ok(self.apply_app_message(conversation_id, message_id, username, &payload))
                     }
                     Ok(Incoming::Commit) => {
                         let after = self
                             .crypto
                             .group_members(conversation_id)
                             .unwrap_or_default();
-                        self.persist().ok()?;
+                        self.persist()
+                            .map_err(|error| format!("could not save MLS state: {error}"))?;
                         self.pin_group_keys(conversation_id);
                         let note = roster_note(&before, &after);
-                        if note.is_empty() { None } else { Some(note) }
+                        Ok(if note.is_empty() { None } else { Some(note) })
                     }
                     Ok(Incoming::Rejected(reason)) => {
                         crate::errln!("commit refused: {reason}");
-                        None
+                        Ok(None)
                     }
-                    Ok(Incoming::Ignored) => None,
+                    Ok(Incoming::Ignored) => Ok(None),
                     Err(error) => {
                         crate::errln!("message not applied: {error}"); // not for this device
-                        None
+                        Ok(None)
                     }
                 }
             }
@@ -1015,7 +1025,6 @@ impl Chat {
             Ok(message) => message,
             Err(_) => return None,
         };
-        self.persist().ok()?;
         let mut store = self.store.lock().expect("store lock");
         match message {
             AppMessage::Text { text } => {

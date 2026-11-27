@@ -99,6 +99,7 @@ async fn peer_text_reaches_the_terminal_escaped() {
             &encode_envelope(&Envelope::mls(&wire)),
         )
         .await
+        .expect("handled")
         .expect("attachment line");
 
     let mut lines = drain(&bob).await;
@@ -160,6 +161,7 @@ async fn an_attachment_with_a_path_for_an_id_is_ignored() {
             &encode_envelope(&Envelope::mls(&wire)),
         )
         .await
+        .expect("handled")
         .expect("a line");
     assert_eq!(line, "alice sent an attachment with an invalid id; ignored");
     let error = bob

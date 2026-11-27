@@ -46,6 +46,11 @@ All notable changes to Thrum are documented here. The format follows
 
 ### Fixed
 
+- The CLI no longer acknowledges a Welcome, commit or message it could
+  not apply because a request for the conversation's roster failed or its
+  new MLS state could not be saved. The message stays queued, the
+  command stops with the error, and the next run applies it. Before, the
+  device lost the group or the message (#40).
 - Administrative routes (adding or removing members, renaming, minting or
   revoking invites) answer someone outside the conversation with the 404
   of a conversation that does not exist, so a non-member cannot confirm

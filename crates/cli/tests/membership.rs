@@ -104,7 +104,7 @@ async fn a_relabeled_message_is_dropped() {
         carol
             .interpret(&conv, "relabeled-1", "alice", &payload)
             .await,
-        None
+        Ok(None)
     );
     let entry = carol.find_message(&alice_msg).unwrap().1;
     assert_eq!(entry.text, "lunch at noon");

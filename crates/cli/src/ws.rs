@@ -2,7 +2,11 @@
 //!
 //! This module only transports relay frames; interpreting the opaque
 //! payloads (MLS processing) is the caller's job via the `interpret`
-//! callback. Every message is acknowledged so the server stops queueing it.
+//! callback. A message is acknowledged, so the server stops queueing it,
+//! only once `interpret` returns `Ok`. An `Err` means the message could not
+//! be handled yet (the network failed, say): it stays unacknowledged, and
+//! the connection stops there so later messages are not applied out of
+//! order. The server offers it again on the next connection.
 
 use std::collections::HashSet;
 use std::time::Duration;
@@ -23,14 +27,16 @@ pub struct RecvOptions {
 }
 
 /// Connect to the server, authenticate, interpret one payload at a time,
-/// print what the interpreter returns, and acknowledge every message.
+/// print what the interpreter returns, and acknowledge each message it
+/// handled. Returns the interpreter's error, with the message left
+/// queued, when it could not handle one.
 ///
 /// With `once`, the call returns after the server confirms the first
 /// acknowledgement, which makes scripts and tests deterministic.
 pub async fn recv(
     session: &Session,
     options: &RecvOptions,
-    interpret: impl AsyncFnMut(&str, &str, &str, &[u8]) -> Option<String>,
+    interpret: impl AsyncFnMut(&str, &str, &str, &[u8]) -> Result<Option<String>, String>,
     emit: impl FnMut(String),
 ) -> Result<(), String> {
     run(session, options, false, interpret, emit).await
@@ -44,7 +50,7 @@ const DRAIN_TIMEOUT_SECS: u64 = 10;
 /// before anything that needs a current group state.
 pub async fn drain(
     session: &Session,
-    interpret: impl AsyncFnMut(&str, &str, &str, &[u8]) -> Option<String>,
+    interpret: impl AsyncFnMut(&str, &str, &str, &[u8]) -> Result<Option<String>, String>,
     emit: impl FnMut(String),
 ) -> Result<(), String> {
     let options = RecvOptions {
@@ -58,7 +64,7 @@ async fn run(
     session: &Session,
     options: &RecvOptions,
     until_caught_up: bool,
-    mut interpret: impl AsyncFnMut(&str, &str, &str, &[u8]) -> Option<String>,
+    mut interpret: impl AsyncFnMut(&str, &str, &str, &[u8]) -> Result<Option<String>, String>,
     mut emit: impl FnMut(String),
 ) -> Result<(), String> {
     let url = ws_url(&session.server)?;
@@ -103,7 +109,7 @@ async fn run(
                         if !seen.insert(message_id.clone()) {
                             continue; // live and queued copies can overlap
                         }
-                        if let Some(line) = interpret_payload(
+                        let line = interpret_payload(
                             &mut interpret,
                             &conversation_id,
                             &message_id,
@@ -111,7 +117,8 @@ async fn run(
                             &payload_base64,
                         )
                         .await
-                        {
+                        .map_err(|error| format!("{error}; the message stays queued"))?;
+                        if let Some(line) = line {
                             emit(line);
                         }
                         send_frame(
@@ -142,15 +149,18 @@ async fn run(
     }
 }
 
-/// Decode and interpret one base64 payload.
+/// Decode and interpret one base64 payload. A payload that is not valid
+/// base64 can never be handled, so it counts as handled with nothing to show.
 async fn interpret_payload(
-    interpret: &mut impl AsyncFnMut(&str, &str, &str, &[u8]) -> Option<String>,
+    interpret: &mut impl AsyncFnMut(&str, &str, &str, &[u8]) -> Result<Option<String>, String>,
     conversation_id: &str,
     message_id: &str,
     sender_username: &str,
     payload_base64: &str,
-) -> Option<String> {
-    let payload = decode_payload(payload_base64)?;
+) -> Result<Option<String>, String> {
+    let Some(payload) = decode_payload(payload_base64) else {
+        return Ok(None);
+    };
     interpret(conversation_id, message_id, sender_username, &payload).await
 }
 
@@ -205,7 +215,7 @@ mod tests {
         let encoded = thrum_core::protocol::encode_payload(b"plain");
         let line = interpret_payload(
             &mut async |_conversation: &str, _message_id: &str, _sender: &str, payload: &[u8]| {
-                Some(String::from_utf8_lossy(payload).into_owned())
+                Ok(Some(String::from_utf8_lossy(payload).into_owned()))
             },
             "conv",
             "m1",
@@ -213,6 +223,6 @@ mod tests {
             &encoded,
         )
         .await;
-        assert_eq!(line, Some("plain".to_string()));
+        assert_eq!(line, Ok(Some("plain".to_string())));
     }
 }
