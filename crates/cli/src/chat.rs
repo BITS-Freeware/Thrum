@@ -286,16 +286,17 @@ impl Chat {
         Ok(())
     }
 
-    /// Remove a member: the MLS removal commit goes out first, so the removed
-    /// member still receives it and loses access, then the server stops
-    /// delivering to them. Admin only, enforced by the server.
+    /// Remove a member: the server removal first, then the MLS removal
+    /// commit. Other devices accept a removal only once the server no longer
+    /// lists the device, so a commit sent before the server agreed would be
+    /// refused everywhere and leave this device alone in a newer epoch. If
+    /// the commit is lost, the next `sync` by any member removes the leaves
+    /// the server no longer lists. Admin only, enforced by the server.
     pub async fn remove_member(&self, conversation_id: &str, username: &str) -> Result<(), String> {
-        let commit = self.remove_member_mls(conversation_id, username).await?;
         self.client
             .remove_member(&self.session.token, conversation_id, username)
             .await?;
-        let _ = commit;
-        Ok(())
+        self.remove_member_mls(conversation_id, username).await
     }
 
     /// Rename a conversation; admin only.
@@ -344,11 +345,7 @@ impl Chat {
     }
 
     /// The MLS half of a removal: build the commit, send it, merge locally.
-    async fn remove_member_mls(
-        &self,
-        conversation_id: &str,
-        username: &str,
-    ) -> Result<Vec<u8>, String> {
+    async fn remove_member_mls(&self, conversation_id: &str, username: &str) -> Result<(), String> {
         self.catch_up().await?;
         let roster = self
             .crypto
@@ -362,12 +359,8 @@ impl Chat {
             })
             .cloned()
             .collect();
-        if targets.is_empty() {
-            return Err(format!("{username} has no devices in this group"));
-        }
-        let mut commit = Vec::new();
         for target in targets {
-            commit = self
+            let commit = self
                 .crypto
                 .remove_member(conversation_id, &target)
                 .map_err(|error| error.to_string())?;
@@ -377,7 +370,7 @@ impl Chat {
                 .send_message(&self.session.token, conversation_id, &payload)
                 .await?;
         }
-        Ok(commit)
+        Ok(())
     }
 
     /// Credential identities currently in a conversation's MLS group.
