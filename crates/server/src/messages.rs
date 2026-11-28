@@ -8,6 +8,17 @@ use crate::accounts::now;
 use crate::error::ApiError;
 use crate::frames::encode_payload;
 
+/// Add a member (`$1` conversation, `$2` user, `$3` join time) at the end
+/// of the conversation's join order. Join times are whole seconds, so the
+/// order, not the time, decides who joined first (ownership passes to the
+/// first remaining joiner when the owner's account is deleted). Run it under
+/// the conversation's lock, or in the transaction that creates it.
+pub(crate) const INSERT_MEMBER: &str = "INSERT INTO conversation_members \
+     (conversation_id, user_id, joined_at, join_seq) \
+     VALUES ($1, $2, $3, (SELECT COALESCE(MAX(join_seq), 0) + 1 \
+     FROM conversation_members WHERE conversation_id = $1)) \
+     ON CONFLICT DO NOTHING";
+
 /// Create a conversation with `creator_id` (its admin) and every listed
 /// member user id. Returns the conversation id.
 pub async fn create_conversation(
@@ -29,7 +40,7 @@ pub async fn create_conversation(
     .execute(&mut *tx)
     .await?;
     for user_id in std::iter::once(creator_id).chain(member_ids.iter().copied()) {
-        sqlx::query("INSERT INTO conversation_members (conversation_id, user_id, joined_at) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING")
+        sqlx::query(crate::messages::INSERT_MEMBER)
             .bind(&conversation_id)
             .bind(user_id)
             .bind(started_at)

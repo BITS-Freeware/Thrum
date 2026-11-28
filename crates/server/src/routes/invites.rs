@@ -190,15 +190,12 @@ pub async fn redeem(
         if consumed == 0 {
             return Err(ApiError::not_found());
         }
-        sqlx::query(
-            "INSERT INTO conversation_members (conversation_id, user_id, joined_at)
-             VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
-        )
-        .bind(&conversation_id)
-        .bind(authed.user_id)
-        .bind(now)
-        .execute(&mut *tx)
-        .await?;
+        sqlx::query(crate::messages::INSERT_MEMBER)
+            .bind(&conversation_id)
+            .bind(authed.user_id)
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
     }
     tx.commit().await?;
     Ok((

@@ -82,15 +82,12 @@ pub async fn add_members(
         .bind(user_id)
         .execute(&mut *tx)
         .await?;
-        sqlx::query(
-            "INSERT INTO conversation_members (conversation_id, user_id, joined_at)
-             VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
-        )
-        .bind(&conversation_id)
-        .bind(user_id)
-        .bind(crate::accounts::now())
-        .execute(&mut *tx)
-        .await?;
+        sqlx::query(crate::messages::INSERT_MEMBER)
+            .bind(&conversation_id)
+            .bind(user_id)
+            .bind(crate::accounts::now())
+            .execute(&mut *tx)
+            .await?;
     }
     tx.commit().await?;
 

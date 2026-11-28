@@ -367,7 +367,8 @@ is withdrawn, the entry stays with the reason.
 - **Source**: decision 0010 (Deletion).
 - **Checked by**: `thrum-server` `account::delete_account_wrong_password`,
   `delete_account_removes_everything`,
-  `delete_account_transfers_ownership`;
+  `delete_account_transfers_ownership`,
+  `delete_account_hands_ownership_to_the_first_joiner_within_a_second`;
   `account_deletion::deletion_while_another_device_sends_is_all_or_nothing`
   and `deleting_an_account_removes_its_blob_objects`, on both databases;
   `shutdown::a_deleted_account_does_not_linger_in_the_file`.
