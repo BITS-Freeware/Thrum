@@ -385,7 +385,8 @@ pub async fn delete_account(
         .await?;
 
     // 5. Transfer ownership of conversations the user owned.
-    //    Earliest remaining member takes it; NULL when no member remains.
+    //    The first remaining member to join takes it (join order, not join
+    //    time, which ties within a second); NULL when no member remains.
     sqlx::query(
         r#"
         UPDATE conversations
@@ -394,7 +395,7 @@ pub async fn delete_account(
             FROM conversation_members cm
             WHERE cm.conversation_id = conversations.id
               AND cm.user_id <> $1
-            ORDER BY cm.joined_at
+            ORDER BY cm.join_seq, cm.user_id
             LIMIT 1
         )
         WHERE owner_user_id = $1

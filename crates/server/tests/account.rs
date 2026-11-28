@@ -199,3 +199,57 @@ async fn a_deleted_name_stays_retired() {
         assert_eq!(body["error"], "username_taken");
     }
 }
+
+/// Ownership goes to the member who joined first, even when two joins land
+/// in the same second: bob's account is older than carol's, but carol was
+/// added first, so she takes over.
+#[tokio::test]
+async fn delete_account_hands_ownership_to_the_first_joiner_within_a_second() {
+    let app = TestApp::spawn().await;
+    let (token_a, _token_b) = two_users(&app).await;
+    register(&app, "carol", "carol's long password").await;
+    let token_c = login(&app, "carol", "carol's long password", "laptop").await["token"]
+        .as_str()
+        .expect("token")
+        .to_string();
+
+    let conv_id = create_conv(&app, &token_a, "test").await;
+    for member in ["carol", "bob"] {
+        let added = app
+            .client
+            .post(app.url(&format!("/v1/conversations/{conv_id}/members")))
+            .bearer_auth(&token_a)
+            .json(&json!({ "members": [member] }))
+            .send()
+            .await
+            .expect("add member");
+        assert!(
+            added.status().is_success(),
+            "add {member}: {}",
+            added.status()
+        );
+    }
+
+    let resp = app
+        .client
+        .delete(app.url("/v1/account"))
+        .bearer_auth(&token_a)
+        .json(&json!({ "password": "correct horse battery" }))
+        .send()
+        .await
+        .expect("delete request");
+    assert_eq!(resp.status(), 204);
+
+    let convs: Vec<Value> = app
+        .client
+        .get(app.url("/v1/conversations"))
+        .bearer_auth(&token_c)
+        .send()
+        .await
+        .expect("list convs")
+        .json()
+        .await
+        .expect("convs body");
+    assert_eq!(convs.len(), 1);
+    assert_eq!(convs[0]["admin"], "carol");
+}

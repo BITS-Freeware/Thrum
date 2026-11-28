@@ -46,6 +46,10 @@ All notable changes to Thrum are documented here. The format follows
 
 ### Fixed
 
+- Deleting a conversation owner's account hands ownership to the member
+  who joined first, as decision 0010 says. Join times are whole seconds,
+  so two members who joined in the same second used to tie, and the older
+  account took over even if it joined later (#42).
 - The CLI no longer acknowledges a Welcome, commit or message it could
   not apply because a request for the conversation's roster failed or its
   new MLS state could not be saved. The message stays queued, the
