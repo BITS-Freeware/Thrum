@@ -8,6 +8,8 @@ All notable changes to Thrum are documented here. The format follows
 
 ### Added
 
+- `DeviceCrypto::group_epoch` returns a group's current MLS epoch, so
+  tests can check that members have applied the same commits.
 - `thrum-server healthcheck` checks `/healthz` from inside the container;
   the image and the Compose file use it as their health check.
 - The server prints its effective configuration at startup, with the S3
