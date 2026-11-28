@@ -2,7 +2,7 @@
 
 use axum::Json;
 use axum::body::Bytes;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -122,12 +122,22 @@ pub async fn list(
     Ok(Json(out))
 }
 
+/// Query parameters of a send.
+#[derive(Debug, Default, Deserialize)]
+pub struct SendQuery {
+    /// Set when the payload is an MLS commit: the epoch it was built in.
+    pub commit_epoch: Option<u64>,
+}
+
 /// `POST /v1/conversations/{conversation_id}/messages`: store an opaque
-/// payload and deliver it to the other member devices.
+/// payload and deliver it to the other member devices. With
+/// `?commit_epoch=N` the payload is a commit for epoch N, taken only if no
+/// other commit took that epoch first (see [`messages::store_message`]).
 pub async fn send_message(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(conversation_id): Path<String>,
+    Query(query): Query<SendQuery>,
     body: Bytes,
 ) -> Result<impl IntoResponse, ApiError> {
     let authed = auth::authenticate(&state, &headers).await?;
@@ -158,6 +168,7 @@ pub async fn send_message(
         (authed.user_id, &authed.device_id),
         &body,
         state.cfg.queued_bytes_per_account,
+        query.commit_epoch,
     )
     .await?;
     // Opportunistically drop expired undelivered messages.

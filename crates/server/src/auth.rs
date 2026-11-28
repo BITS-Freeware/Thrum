@@ -48,7 +48,7 @@ pub fn token_hash(token: &str) -> String {
     hex_encode(&Sha256::digest(token.as_bytes()))
 }
 
-fn hex_encode(bytes: &[u8]) -> String {
+pub(crate) fn hex_encode(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
         out.push_str(&format!("{byte:02x}"));

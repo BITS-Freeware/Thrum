@@ -34,7 +34,10 @@ content.
 3. The initiating client builds the MLS group (a two-member group for a
    one-to-one chat) and sends the MLS commit and welcome messages through the
    server. The server checks membership requests against its conversation
-   records but cannot read inside them.
+   records but cannot read inside them. A client marks a commit with the
+   epoch it was built in, and the server takes one commit per epoch, so
+   two devices changing the group at once cannot both go through
+   (decision 0018).
 4. Application messages are MLS application messages: opaque ciphertext plus
    routing metadata. The server forwards them to the other devices in the
    conversation over WebSocket, and queues them for devices that are offline

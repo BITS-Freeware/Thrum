@@ -319,7 +319,10 @@ is withdrawn, the entry stays with the reason.
   `the_queue_ends_with_a_caught_up_marker`; `thrum-cli`
   `catch_up::sync_after_a_missed_add_does_not_fork_the_group` (a device
   returning after a missed add applies it before planning its own) and
-  `restore::a_device_restored_from_an_old_backup_can_still_be_invited`.
+  `restore::a_device_restored_from_an_old_backup_can_still_be_invited`;
+  `thrum-cli` `commit_order::a_commit_that_lost_its_epoch_is_dropped`,
+  `a_commit_whose_reply_was_lost_is_merged_when_it_comes_back`;
+  `thrum-server` `commit_order::*` (one commit per epoch, decision 0018).
   Gap: no test drops, duplicates or reorders frames, or restarts the
   server between send and ack.
 - **Could break under**: a crash between storing and fan-out; an ack for a

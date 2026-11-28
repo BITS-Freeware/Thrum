@@ -52,20 +52,33 @@ pub async fn create_conversation(
 }
 
 /// Store an opaque message and fan delivery rows out to every live device
-/// of every member except the sending device.
+/// of every member except the sending device (a commit goes to the
+/// sending device as well).
 ///
 /// `queue_cap` bounds the bytes of the sending account's messages that
 /// some device has not received yet, this one included; zero means no cap.
 /// The check runs under a lock on the sender's account row, so parallel
 /// sends cannot pass it together.
 ///
-/// Returns the message id and the device ids the message was queued for.
+/// `commit_epoch` is set when the payload is an MLS commit, to the epoch
+/// the sender's group was in when it built the commit. The server takes one
+/// commit per epoch: a commit for an epoch some earlier commit already
+/// advanced past is refused with `409 stale_epoch`, so two devices that
+/// commit at once cannot both be relayed and split the group. A commit for
+/// a later epoch than the server expects is taken, because commits sent
+/// without an epoch (older clients) advance the group unseen. A retry of the
+/// last commit taken, byte for byte, gets that commit's id again and is not
+/// queued twice, so a sender whose reply was lost can learn it went through.
+///
+/// Returns the message id and the device ids the message was queued for;
+/// no devices for a repeated commit.
 pub async fn store_message(
     db: &AnyPool,
     conversation_id: &str,
     sender: (i64, &str),
     payload: &[u8],
     queue_cap: u64,
+    commit_epoch: Option<u64>,
 ) -> Result<(String, Vec<String>), ApiError> {
     let (sender_user, sender_device) = sender;
     let message_id = Uuid::new_v4().to_string();
@@ -98,6 +111,46 @@ pub async fn store_message(
             ));
         }
     }
+    let commit_hash = commit_epoch.map(|_| {
+        use sha2::Digest as _;
+        crate::auth::hex_encode(&sha2::Sha256::digest(payload))
+    });
+    if let (Some(epoch), Some(hash)) = (commit_epoch, &commit_hash) {
+        if !crate::routes::conversations::lock_conversation(&mut tx, conversation_id)
+            .await
+            .map_err(|_| internal())?
+        {
+            return Err(ApiError::not_found());
+        }
+        let (expected, last_hash, last_id) =
+            sqlx::query_as::<_, (Option<i64>, Option<String>, Option<String>)>(
+                "SELECT commit_epoch, last_commit_hash, last_commit_id FROM conversations WHERE id = $1",
+            )
+            .bind(conversation_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|_| internal())?;
+        if last_hash.as_deref() == Some(hash.as_str())
+            && let Some(last_id) = last_id
+        {
+            return Ok((last_id, Vec::new()));
+        }
+        let epoch = i64::try_from(epoch).map_err(|_| ApiError::bad_request("bad_commit_epoch"))?;
+        if expected.is_some_and(|expected| epoch < expected) {
+            return Err(ApiError::conflict("stale_epoch"));
+        }
+        sqlx::query(
+            "UPDATE conversations SET commit_epoch = $1, last_commit_hash = $2, last_commit_id = $3
+             WHERE id = $4",
+        )
+        .bind(epoch + 1)
+        .bind(hash)
+        .bind(&message_id)
+        .bind(conversation_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| internal())?;
+    }
     sqlx::query("INSERT INTO messages (id, conversation_id, sender_device, payload, created_at) VALUES ($1, $2, $3, $4, $5)")
         .bind(&message_id)
         .bind(conversation_id)
@@ -117,6 +170,13 @@ pub async fn store_message(
     .fetch_all(&mut *tx)
     .await
     .map_err(|_| internal())?;
+    // A commit goes back to its sender too, in order with everything else,
+    // so a sender whose reply was lost still learns its commit was taken
+    // before any commit built on top of it.
+    let mut recipients = recipients;
+    if commit_epoch.is_some() {
+        recipients.push((sender_device.to_string(),));
+    }
     for (device_id,) in &recipients {
         sqlx::query(
             "INSERT INTO deliveries (message_id, device_id, queued_at) VALUES ($1, $2, $3)",
