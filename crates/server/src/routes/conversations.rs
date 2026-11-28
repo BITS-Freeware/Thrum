@@ -36,6 +36,11 @@ pub struct ConversationInfo {
     /// Username of the conversation admin (the creator).
     pub admin: String,
     pub members: Vec<String>,
+    /// The group's epoch as far as the server knows it: the one after the
+    /// last commit it took with `commit_epoch` (decision 0018), or `None`
+    /// before the first. A device whose group is behind it has missed
+    /// commits, for example because it was removed and added again.
+    pub epoch: Option<i64>,
 }
 
 /// `POST /v1/conversations`: create a conversation with the caller as its
@@ -307,8 +312,8 @@ pub(crate) async fn conversation_info(
     state: &AppState,
     conversation_id: &str,
 ) -> Result<ConversationInfo, ApiError> {
-    let (name, owner_id) = sqlx::query_as::<_, (String, Option<i64>)>(
-        "SELECT name, owner_user_id FROM conversations WHERE id = $1",
+    let (name, owner_id, epoch) = sqlx::query_as::<_, (String, Option<i64>, Option<i64>)>(
+        "SELECT name, owner_user_id, commit_epoch FROM conversations WHERE id = $1",
     )
     .bind(conversation_id)
     .fetch_optional(&state.db)
@@ -331,6 +336,7 @@ pub(crate) async fn conversation_info(
         name,
         admin,
         members,
+        epoch,
     })
 }
 

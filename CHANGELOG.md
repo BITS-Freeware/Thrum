@@ -62,6 +62,11 @@ All notable changes to Thrum are documented here. The format follows
   welcome goes out after that. A commit whose reply was lost is handed
   back by the server and merged then, and a retry of it is answered with
   its id instead of being queued twice.
+- A member who was removed and then added again joins the group again.
+  With the server removal first, the removed device kept its old group
+  and refused the new welcome. The conversation list now shows the epoch
+  the server knows, and a device whose group is behind it takes the
+  welcome.
 - The CLI removes a member on the server before it sends the MLS removal
   commit (#45). Other devices accept a removal only once the server no
   longer lists the device, so a commit sent first was refused everywhere

@@ -849,9 +849,27 @@ impl DeviceCrypto {
         welcome_bytes: &[u8],
         roster: &ServerRoster,
     ) -> Result<String, MlsError> {
+        self.process_welcome_at(conversation_id, welcome_bytes, roster, None)
+    }
+
+    /// [`DeviceCrypto::process_welcome`], told the group epoch the server
+    /// knows (decision 0018). A device whose own group is behind that epoch
+    /// has missed commits: it was removed (the server removal comes first,
+    /// so the removed device never gets the commit that removes it) and is
+    /// now being added again. Its old group is dropped and the welcome
+    /// joins the current one. A device that is up to date still refuses a
+    /// welcome for a group it is in.
+    pub fn process_welcome_at(
+        &self,
+        conversation_id: &str,
+        welcome_bytes: &[u8],
+        roster: &ServerRoster,
+        server_epoch: Option<u64>,
+    ) -> Result<String, MlsError> {
         let snapshot = self.snapshot();
-        let result =
-            guard_panics(|| self.process_welcome_inner(conversation_id, welcome_bytes, roster));
+        let result = guard_panics(|| {
+            self.process_welcome_inner(conversation_id, welcome_bytes, roster, server_epoch)
+        });
         if result.is_err() {
             self.restore(snapshot);
         }
@@ -863,6 +881,7 @@ impl DeviceCrypto {
         conversation_id: &str,
         welcome_bytes: &[u8],
         roster: &ServerRoster,
+        server_epoch: Option<u64>,
     ) -> Result<String, MlsError> {
         let welcome = Welcome::tls_deserialize_exact_bytes(welcome_bytes).map_err(other)?;
         let processed = ProcessedWelcome::new_from_welcome(&self.provider, &join_config(), welcome)
@@ -876,13 +895,15 @@ impl DeviceCrypto {
             )));
         }
         if let Some(mut existing) = self.group(conversation_id)? {
-            if existing.is_active() {
+            let behind = server_epoch.is_some_and(|epoch| existing.epoch().as_u64() < epoch);
+            if existing.is_active() && !behind {
                 return Err(MlsError::Other(
                     "this device is already in the conversation's group".into(),
                 ));
             }
-            // This device was removed earlier; drop the dead group so the
-            // new welcome can bring it back.
+            // This device was removed earlier, or is behind the server's
+            // epoch; drop the dead group so the new welcome can bring it
+            // back.
             existing.delete(self.provider.storage()).map_err(other)?;
         }
         let staged = processed

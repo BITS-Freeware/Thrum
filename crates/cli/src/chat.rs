@@ -999,6 +999,21 @@ impl Chat {
         };
         match envelope {
             Envelope::Welcome { .. } => {
+                // A device that holds a group for this conversation asks
+                // which epoch the server knows: if its group is behind, it
+                // was removed and is being added again (decision 0018).
+                let server_epoch = if self
+                    .crypto
+                    .has_group(conversation_id)
+                    .map_err(|error| error.to_string())?
+                {
+                    self.client
+                        .conversation_epoch(&self.session.token, conversation_id)
+                        .await
+                        .map_err(|error| format!("welcome not applied yet: {error}"))?
+                } else {
+                    None
+                };
                 let mut outcome = Err(String::new());
                 for refresh in [false, true] {
                     let roster = self
@@ -1007,7 +1022,7 @@ impl Chat {
                         .map_err(|error| format!("welcome not applied yet: {error}"))?;
                     outcome = self
                         .crypto
-                        .process_welcome(conversation_id, &data, &roster)
+                        .process_welcome_at(conversation_id, &data, &roster, server_epoch)
                         .map_err(|error| error.to_string());
                     if outcome.is_ok() {
                         break;

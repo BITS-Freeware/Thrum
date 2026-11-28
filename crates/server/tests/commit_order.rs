@@ -149,3 +149,22 @@ async fn only_members_send_commits() {
     assert_eq!(send(&app, &mallory, &conv, b"commit", Some(0)).await.0, 404);
     assert_eq!(send(&app, &alice, &conv, b"commit", Some(0)).await.0, 201);
 }
+
+#[tokio::test]
+async fn the_conversation_list_shows_the_epoch_the_server_knows() {
+    let app = TestApp::spawn().await;
+    let alice = user(&app, "alice").await;
+    let conv = conversation(&app, alice["token"].as_str().unwrap(), &[]).await;
+    let epoch = async || {
+        let list: Value = app
+            .get("/v1/conversations", alice["token"].as_str())
+            .await
+            .json()
+            .await
+            .unwrap();
+        list[0]["epoch"].clone()
+    };
+    assert_eq!(epoch().await, Value::Null, "no commit taken yet");
+    assert_eq!(send(&app, &alice, &conv, b"commit", Some(4)).await.0, 201);
+    assert_eq!(epoch().await, json!(5));
+}

@@ -159,3 +159,45 @@ async fn a_commit_whose_reply_was_lost_is_merged_when_it_comes_back() {
     assert!(bob.find_message(&hello).is_some(), "bob reads alice");
     assert!(dave.find_message(&hello).is_some(), "dave reads alice");
 }
+
+/// The server removal comes first, so a removed member's device never
+/// gets the commit that removes it and keeps its old group. Added again,
+/// it is behind the epoch the server knows, so it drops that group and
+/// joins the current one instead of refusing the welcome.
+#[tokio::test]
+async fn a_member_removed_and_added_again_joins_the_current_group() {
+    let server = Server::spawn().await;
+    let client = Client::new(server.base.clone());
+    let dir = tempfile::tempdir().expect("dir");
+    let (alice, _, _) = user(&client, dir.path(), "alice").await;
+    let (bob, _, _) = user(&client, dir.path(), "bob").await;
+    let (carol, _, _) = user(&client, dir.path(), "carol").await;
+    let conv = alice
+        .create_conversation(&["bob".into(), "carol".into()], "")
+        .await
+        .expect("create");
+    drain(&bob).await;
+    drain(&carol).await;
+
+    alice.remove_member(&conv, "carol").await.expect("remove");
+    drain(&bob).await;
+    drain(&carol).await;
+    assert!(
+        carol.group_members(&conv).is_ok(),
+        "carol keeps her old group"
+    );
+    carol.top_up_key_packages().await.expect("key packages");
+
+    alice
+        .add_members(&conv, &["carol".into()])
+        .await
+        .expect("add again");
+    drain(&bob).await;
+    drain(&carol).await;
+    assert_eq!(carol.group_members(&conv).expect("rejoined").len(), 3);
+    let hello = alice.send_text(&conv, "welcome back").await.expect("send");
+    drain(&bob).await;
+    drain(&carol).await;
+    assert!(carol.find_message(&hello).is_some(), "carol reads alice");
+    assert!(bob.find_message(&hello).is_some(), "bob reads alice");
+}

@@ -177,6 +177,32 @@ impl Client {
     }
 
     /// List the caller's conversations as (id, members).
+    /// The group epoch the server knows for one of the caller's
+    /// conversations (decision 0018), if it knows one.
+    pub async fn conversation_epoch(
+        &self,
+        token: &str,
+        conversation_id: &str,
+    ) -> Result<Option<u64>, String> {
+        let response = self
+            .http
+            .get(self.endpoint(&["v1", "conversations"])?)
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|error| format!("request failed: {error}"))?;
+        let response = Self::checked(response).await?;
+        let body: Value = response
+            .json()
+            .await
+            .map_err(|error| format!("bad conversation list: {error}"))?;
+        Ok(body.as_array().and_then(|list| {
+            list.iter()
+                .find(|entry| entry["id"].as_str() == Some(conversation_id))
+                .and_then(|entry| entry["epoch"].as_u64())
+        }))
+    }
+
     pub async fn list_conversations(
         &self,
         token: &str,

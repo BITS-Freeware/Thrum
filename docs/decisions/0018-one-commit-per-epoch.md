@@ -41,6 +41,13 @@ into a group state nobody else had (#46).
    again before the device's next change.
 6. **A welcome goes out only after its commit was taken**, so nobody joins
    a group state that lost.
+7. **A device that is behind accepts a welcome for a group it holds.** The
+   conversation list shows the epoch the server knows. Since the server
+   removal comes first (#45), a removed member's device never gets the
+   commit that removes it and keeps its old group. Added again, its group
+   is behind the server's epoch, so it drops that group and joins with the
+   welcome. A device that is up to date still refuses a welcome for a
+   group it is in.
 
 ## Consequences
 
