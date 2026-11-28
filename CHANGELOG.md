@@ -54,6 +54,16 @@ All notable changes to Thrum are documented here. The format follows
 
 ### Fixed
 
+- A commit or message that arrives before a commit it follows is no longer
+  dropped (#49, decision 0019). The device used to ignore it, apply the
+  earlier commit, and stay an epoch behind for good. `process_incoming`
+  now returns `Incoming::Early` for it. When it came live, the CLI leaves
+  it queued and connects again, and catch-up sends the commits in order;
+  one process tries the same message three times before it drops it. One
+  that is still early in catch-up is dropped as before. The web client
+  leaves it queued for the next connection. The server also pushes a message to live connections right after
+  storing it, before its expiry sweep, so live frames keep the order the
+  messages were stored in.
 - Two devices that change a group in the same epoch no longer leave the
   second one on its own copy of the group (#46, decision 0018). The CLI
   sends a commit with the epoch it was built in, the server takes one

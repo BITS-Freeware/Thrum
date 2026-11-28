@@ -17,6 +17,20 @@ use tokio_tungstenite::tungstenite::Message;
 
 use crate::session::Session;
 
+tokio::task_local! {
+    /// Set around each call to `interpret`: whether the frame came after
+    /// the server's `caught_up` marker, as a live push. Catch-up frames come
+    /// in the order the server stored them; live frames can overtake each
+    /// other.
+    static LIVE: bool;
+}
+
+/// Whether the frame being interpreted came live, after catch-up. Outside
+/// a connection (a caller that interprets a payload itself) it is true.
+pub fn frame_is_live() -> bool {
+    LIVE.try_with(|live| *live).unwrap_or(true)
+}
+
 /// How `recv` behaves.
 #[derive(Debug, Clone, Copy)]
 pub struct RecvOptions {
@@ -109,15 +123,19 @@ async fn run(
                         if !seen.insert(message_id.clone()) {
                             continue; // live and queued copies can overlap
                         }
-                        let line = interpret_payload(
-                            &mut interpret,
-                            &conversation_id,
-                            &message_id,
-                            &sender_username,
-                            &payload_base64,
-                        )
-                        .await
-                        .map_err(|error| format!("{error}; the message stays queued"))?;
+                        let line = LIVE
+                            .scope(
+                                caught_up,
+                                interpret_payload(
+                                    &mut interpret,
+                                    &conversation_id,
+                                    &message_id,
+                                    &sender_username,
+                                    &payload_base64,
+                                ),
+                            )
+                            .await
+                            .map_err(|error| format!("{error}; the message stays queued"))?;
                         if let Some(line) = line {
                             emit(line);
                         }

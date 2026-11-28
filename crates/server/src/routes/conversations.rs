@@ -176,9 +176,10 @@ pub async fn send_message(
         query.commit_epoch,
     )
     .await?;
-    // Opportunistically drop expired undelivered messages.
-    let keep_older_than = crate::accounts::now() - state.cfg.queue_ttl_seconds;
-    let _ = messages::cleanup_expired(&state.db, keep_older_than).await;
+    // Push to live connections right after the message is stored, with no
+    // wait in between, so live frames go out in the order the messages were
+    // stored. A wait here would let a later message, even one sent by a
+    // device that already saw this one through catch-up, be pushed first.
     state.hub.broadcast(
         &recipients,
         &ServerFrame::Message {
@@ -189,6 +190,9 @@ pub async fn send_message(
             created_at: crate::accounts::now(),
         },
     );
+    // Opportunistically drop expired undelivered messages.
+    let keep_older_than = crate::accounts::now() - state.cfg.queue_ttl_seconds;
+    let _ = messages::cleanup_expired(&state.db, keep_older_than).await;
     Ok((StatusCode::CREATED, Json(json!({ "id": message_id }))))
 }
 

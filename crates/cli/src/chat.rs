@@ -63,8 +63,30 @@ pub struct Chat {
     /// The server's view of each conversation, used to check welcomes and
     /// commits; refreshed when a check fails.
     rosters: Mutex<HashMap<String, ServerRoster>>,
+    /// How many times each message from a later epoch than its group was
+    /// left queued in this process (see [`EARLY`]).
+    early: Mutex<HashMap<String, u32>>,
     /// Held while this process uses the device, so no other one does.
     _lock: DeviceLock,
+}
+
+/// How many times one process leaves a live message from a later epoch
+/// queued before it gives up on it. Live frames can overtake each other,
+/// but catch-up comes in the order the server stored the messages, so a
+/// message that is still early there needs a commit that is never coming
+/// (one this device refused, or one sent while it was removed) and is
+/// dropped at once. The bound keeps a server that keeps reordering from
+/// stopping every connection at the same place.
+pub const EARLY_TRIES: u32 = 3;
+
+/// The start of the error `interpret` returns for a message from a later
+/// epoch than its group, which is left queued for the next connection.
+pub const EARLY: &str = "message not applied yet: it is from a later epoch";
+
+/// Whether an error from receiving is a message left queued because a
+/// commit before it has not arrived yet; receiving again picks it up.
+pub fn is_early(error: &str) -> bool {
+    error.starts_with(EARLY)
 }
 
 impl Chat {
@@ -107,6 +129,7 @@ impl Chat {
             attachments_dir: state_file_attachments_dir(state_file),
             store: Mutex::new(Store::load(state_file)?),
             rosters: Mutex::new(HashMap::new()),
+            early: Mutex::new(HashMap::new()),
             _lock: lock,
         })
     }
@@ -691,16 +714,27 @@ impl Chat {
     /// Process everything queued for this device before doing something
     /// that needs a current group state (sending, removing). Returns once
     /// the server has sent the whole queue and every frame is applied.
+    ///
+    /// A message that arrives before a commit it needs stops the connection
+    /// with the message left queued (see [`EARLY`]); catching up connects
+    /// again, and the server sends the queue in its own order.
     pub async fn catch_up(&self) -> Result<(), String> {
-        crate::ws::drain(
-            &self.session,
-            async |conversation: &str, message_id: &str, sender: &str, payload: &[u8]| {
-                self.interpret(conversation, message_id, sender, payload)
-                    .await
-            },
-            |_| {},
-        )
-        .await
+        let mut tries = 0;
+        loop {
+            let result = crate::ws::drain(
+                &self.session,
+                async |conversation: &str, message_id: &str, sender: &str, payload: &[u8]| {
+                    self.interpret(conversation, message_id, sender, payload)
+                        .await
+                },
+                |_| {},
+            )
+            .await;
+            match result {
+                Err(error) if is_early(&error) && tries < EARLY_TRIES => tries += 1,
+                result => return result,
+            }
+        }
     }
 
     /// Encrypt and send any application message; returns the relay message id.
@@ -959,8 +993,10 @@ impl Chat {
     ///
     /// `Err` means the payload could not be handled yet and must stay
     /// queued: the server's roster could not be fetched, or the new state
-    /// could not be saved. Only `Ok` is a verdict on the payload, so only
-    /// `Ok` may be acknowledged.
+    /// could not be saved, or the message is from a later epoch than the
+    /// device's group and the commit before it has not arrived yet (see
+    /// [`EARLY`]). Only `Ok` is a verdict on the payload, so only `Ok` may
+    /// be acknowledged.
     ///
     /// Welcomes and commits are checked against the server's roster of the
     /// conversation; a refused one is tried once more with a fresh roster,
@@ -1096,6 +1132,28 @@ impl Chat {
                         Ok(None)
                     }
                     Ok(Incoming::Ignored) => Ok(None),
+                    Ok(Incoming::Early) => {
+                        let tries = if crate::ws::frame_is_live() {
+                            let mut early = self.early.lock().expect("early lock");
+                            let tries = early.entry(message_id.to_string()).or_insert(0);
+                            *tries += 1;
+                            *tries
+                        } else {
+                            EARLY_TRIES + 1
+                        };
+                        if tries <= EARLY_TRIES {
+                            Err(format!(
+                                "{EARLY} than this device's group, so a commit before it \
+                                 has not arrived yet"
+                            ))
+                        } else {
+                            crate::errln!(
+                                "message not applied: it is from a later epoch than this \
+                                 device's group and the commit before it is not coming"
+                            );
+                            Ok(None)
+                        }
+                    }
                     Err(error) => {
                         crate::errln!("message not applied: {error}"); // not for this device
                         Ok(None)
