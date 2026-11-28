@@ -154,8 +154,14 @@ pub enum Incoming {
     Application { sender: String, payload: Vec<u8> },
     /// A commit that advanced the group state (adds, removals, updates).
     Commit,
-    /// Nothing actionable (wrong epoch, not for this device, duplicate).
+    /// Nothing actionable (an old epoch, not for this device, duplicate).
     Ignored,
+    /// A message from a later epoch than this device's group is in: a
+    /// commit before it has not been applied yet. Nothing changed. The
+    /// commit may still be on its way (frames can arrive out of order), so
+    /// the caller should leave the message queued and take it again after
+    /// the commits before it, rather than drop it for good.
+    Early,
     /// A commit that the server's roster does not allow. Nothing was
     /// merged and the device state is as it was before the call, so the
     /// caller may refresh the roster and try the same message again.
@@ -791,6 +797,9 @@ impl DeviceCrypto {
                 .try_into_protocol_message()
                 .map_err(other)
         })?;
+        if message.group_id() == group.group_id() && message.epoch() > group.epoch() {
+            return Ok(Incoming::Early);
+        }
         let processed = match group.process_message(&self.provider, message) {
             Ok(processed) => processed,
             Err(_) => return Ok(Incoming::Ignored),
@@ -1292,6 +1301,43 @@ mod tests {
                 Ok(Incoming::Application { .. })
             ));
         }
+    }
+
+    #[test]
+    fn a_message_from_a_later_epoch_waits_for_the_commit_before_it() {
+        let alice = device("alice", 1);
+        let bob = device("bob", 1);
+        let carol = device("carol", 1);
+        let (_, conversation) = setup_two(&alice, &bob);
+        let conversation = String::from_utf8(conversation).unwrap();
+        let roster = roster_of(&[&alice, &bob, &carol]);
+        let before = bob.group_epoch(&conversation).unwrap();
+
+        // alice adds carol and then speaks in the new epoch.
+        let pending = alice
+            .stage_add_members(&conversation, &[carol.new_key_package().unwrap()])
+            .expect("stage");
+        alice
+            .process_incoming(&conversation, &pending.commit, &roster)
+            .expect("alice's own commit comes back");
+        let hello = alice.encrypt(&conversation, b"hello").unwrap();
+
+        // bob gets them the wrong way round. The message is early, and
+        // nothing about bob's group changes.
+        assert!(matches!(
+            bob.process_incoming(&conversation, &hello, &roster),
+            Ok(Incoming::Early)
+        ));
+        assert_eq!(bob.group_epoch(&conversation).unwrap(), before);
+        // Once the commit is in, the same message reads.
+        assert!(matches!(
+            bob.process_incoming(&conversation, &pending.commit, &roster),
+            Ok(Incoming::Commit)
+        ));
+        assert!(matches!(
+            bob.process_incoming(&conversation, &hello, &roster),
+            Ok(Incoming::Application { payload, .. }) if payload == b"hello"
+        ));
     }
 
     #[test]

@@ -755,6 +755,14 @@ export class CryptoSession {
       }
       if (incoming.kind !== "rejected") break;
     }
+    if (incoming.kind === "early") {
+      // From a later epoch than this device's group: a commit before it
+      // has not arrived yet (frames can come out of order). Leave it
+      // queued, as for a message that beats its welcome; the next
+      // connection offers it again after the commits before it.
+      console.warn("message", messageId, "arrived before an earlier commit; leaving un-acked");
+      return false;
+    }
     if (incoming.kind === "rejected") {
       console.warn("commit refused:", incoming.reason);
       return true;

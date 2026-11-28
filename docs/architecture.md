@@ -41,7 +41,9 @@ content.
 4. Application messages are MLS application messages: opaque ciphertext plus
    routing metadata. The server forwards them to the other devices in the
    conversation over WebSocket, and queues them for devices that are offline
-   until they reconnect or the queue expires.
+   until they reconnect or the queue expires. A device that gets a message
+   from a later epoch than its group leaves it queued and reconnects, so
+   the commits before it come first (decision 0019).
 5. Every device of every member is a member of the MLS group, so all of a
    user's devices see the same history from the epoch they joined.
 

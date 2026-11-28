@@ -304,38 +304,61 @@ async fn run(cli: &Cli, base: &str) -> Result<(), String> {
             // their welcomes promptly. The queue goes first: planning roster
             // changes before applying a commit already waiting would split
             // the group.
+            // A message that came before a commit it needs is left queued
+            // and stops the connection; connecting again takes the queue
+            // in the server's order.
             let mut shown = 0usize;
-            thrum_cli::ws::drain(
-                &chat.session,
-                async |conversation: &str, message_id: &str, sender: &str, payload: &[u8]| {
-                    chat.interpret(conversation, message_id, sender, payload)
-                        .await
-                },
-                |line| {
-                    shown += 1;
-                    thrum_cli::outln!("{line}");
-                },
-            )
-            .await?;
+            let mut tries = 0;
+            loop {
+                let result = thrum_cli::ws::drain(
+                    &chat.session,
+                    async |conversation: &str, message_id: &str, sender: &str, payload: &[u8]| {
+                        chat.interpret(conversation, message_id, sender, payload)
+                            .await
+                    },
+                    |line| {
+                        shown += 1;
+                        thrum_cli::outln!("{line}");
+                    },
+                )
+                .await;
+                match result {
+                    Err(error)
+                        if thrum_cli::chat::is_early(&error)
+                            && tries < thrum_cli::chat::EARLY_TRIES =>
+                    {
+                        tries += 1;
+                    }
+                    result => break result?,
+                }
+            }
             if let Err(error) = chat.sync().await {
                 thrum_cli::errln!("note: sync failed: {error}");
             }
             if *once && shown > 0 {
                 return Ok(());
             }
-            recv(
-                &chat.session,
-                &RecvOptions {
-                    once: *once,
-                    timeout_secs: *timeout,
-                },
-                async |conversation: &str, message_id: &str, sender: &str, payload: &[u8]| {
-                    chat.interpret(conversation, message_id, sender, payload)
-                        .await
-                },
-                |line| thrum_cli::outln!("{line}"),
-            )
-            .await?;
+            loop {
+                let result = recv(
+                    &chat.session,
+                    &RecvOptions {
+                        once: *once,
+                        timeout_secs: *timeout,
+                    },
+                    async |conversation: &str, message_id: &str, sender: &str, payload: &[u8]| {
+                        chat.interpret(conversation, message_id, sender, payload)
+                            .await
+                    },
+                    |line| thrum_cli::outln!("{line}"),
+                )
+                .await;
+                // Each message is left queued at most a few times before
+                // it is dropped, so this ends.
+                match result {
+                    Err(error) if thrum_cli::chat::is_early(&error) => {}
+                    result => break result?,
+                }
+            }
         }
         Command::Add {
             conversation,

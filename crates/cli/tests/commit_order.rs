@@ -201,3 +201,107 @@ async fn a_member_removed_and_added_again_joins_the_current_group() {
     assert!(carol.find_message(&hello).is_some(), "carol reads alice");
     assert!(bob.find_message(&hello).is_some(), "bob reads alice");
 }
+
+/// Every frame queued for a device, acknowledged but not applied, so a
+/// test can hand them to the device in another order.
+async fn take_frames(session: &Session) -> Vec<(String, String, String, Vec<u8>)> {
+    let mut frames = Vec::new();
+    recv(
+        session,
+        &RecvOptions {
+            once: false,
+            timeout_secs: 1,
+        },
+        async |conversation: &str, message_id: &str, sender: &str, payload: &[u8]| {
+            frames.push((
+                conversation.to_string(),
+                message_id.to_string(),
+                sender.to_string(),
+                payload.to_vec(),
+            ));
+            Ok(None)
+        },
+        |_| {},
+    )
+    .await
+    .expect("recv");
+    frames
+}
+
+/// Bob gets alice's message before the commit it was sent after. He keeps
+/// the message queued instead of dropping it, applies the commit, and then
+/// reads the message. One he can never apply is dropped after a few tries.
+#[tokio::test]
+async fn a_message_that_arrives_before_its_commit_is_kept_for_later() {
+    let server = Server::spawn().await;
+    let client = Client::new(server.base.clone());
+    let dir = tempfile::tempdir().expect("dir");
+    let (alice, _, _) = user(&client, dir.path(), "alice").await;
+    let (bob, bob_session, _) = user(&client, dir.path(), "bob").await;
+    let (_carol, _, _) = user(&client, dir.path(), "carol").await;
+    let conv = alice
+        .create_conversation(&["bob".into()], "")
+        .await
+        .expect("create");
+    drain(&bob).await;
+
+    alice
+        .add_members(&conv, &["carol".into()])
+        .await
+        .expect("add");
+    let hello = alice.send_text(&conv, "after the add").await.expect("send");
+    let frames = take_frames(&bob_session).await;
+    let (message, before): (Vec<_>, Vec<_>) =
+        frames.into_iter().partition(|frame| frame.1 == hello);
+    let message = &message[0];
+    assert!(!before.is_empty(), "the add's commit came first");
+
+    let error = bob
+        .interpret(&message.0, &message.1, &message.2, &message.3)
+        .await
+        .expect_err("the message waits");
+    assert!(thrum_cli::chat::is_early(&error), "{error}");
+    for frame in &before {
+        bob.interpret(&frame.0, &frame.1, &frame.2, &frame.3)
+            .await
+            .expect("what came before applies");
+    }
+    bob.interpret(&message.0, &message.1, &message.2, &message.3)
+        .await
+        .expect("the message applies");
+    assert!(bob.find_message(&hello).is_some(), "bob reads alice");
+
+    // A live message from an epoch bob never reaches is tried a few
+    // times, then dropped, so it cannot hold up everything behind it. (In
+    // catch-up, which comes in the server's order, it is dropped at once:
+    // `a_member_removed_and_added_again_joins_the_current_group` has the
+    // removed member's copy of the add come before its welcome.)
+    let other = alice
+        .create_conversation(&["bob".into()], "")
+        .await
+        .expect("create");
+    drain(&bob).await;
+    alice
+        .add_members(&other, &["carol".into()])
+        .await
+        .expect("add");
+    let later = alice.send_text(&other, "never").await.expect("send");
+    let frames = take_frames(&bob_session).await;
+    let message = frames
+        .iter()
+        .find(|frame| frame.1 == later)
+        .expect("message");
+    for _ in 0..thrum_cli::chat::EARLY_TRIES {
+        let error = bob
+            .interpret(&message.0, &message.1, &message.2, &message.3)
+            .await
+            .expect_err("left queued");
+        assert!(thrum_cli::chat::is_early(&error), "{error}");
+    }
+    assert_eq!(
+        bob.interpret(&message.0, &message.1, &message.2, &message.3)
+            .await,
+        Ok(None),
+        "dropped once the tries are used up"
+    );
+}

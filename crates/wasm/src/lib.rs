@@ -196,8 +196,11 @@ impl DeviceState {
     /// Process one serialized MLS message, checking commits against the
     /// server's current roster (JSON as for [`roster`]). Returns
     /// `{ kind: "application", sender, payload }`, `{ kind: "commit" }`,
-    /// `{ kind: "ignored" }` or `{ kind: "rejected", reason }`. A rejected
-    /// commit leaves the device unchanged; retry with a fresher roster.
+    /// `{ kind: "ignored" }`, `{ kind: "early" }` or
+    /// `{ kind: "rejected", reason }`. A rejected commit leaves the device
+    /// unchanged; retry with a fresher roster. An early message is from a
+    /// later epoch than the group: leave it queued until the commits
+    /// before it are applied.
     pub fn process_incoming(
         &self,
         conversation_id: &str,
@@ -216,6 +219,7 @@ impl DeviceState {
             ]),
             Incoming::Commit => object(&[("kind", "commit".into())]),
             Incoming::Ignored => object(&[("kind", "ignored".into())]),
+            Incoming::Early => object(&[("kind", "early".into())]),
             Incoming::Rejected(reason) => {
                 object(&[("kind", "rejected".into()), ("reason", reason.into())])
             }

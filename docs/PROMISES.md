@@ -322,10 +322,13 @@ is withdrawn, the entry stays with the reason.
   `restore::a_device_restored_from_an_old_backup_can_still_be_invited`;
   `thrum-cli` `commit_order::a_commit_that_lost_its_epoch_is_dropped`,
   `a_commit_whose_reply_was_lost_is_merged_when_it_comes_back`,
-  `a_member_removed_and_added_again_joins_the_current_group`;
+  `a_member_removed_and_added_again_joins_the_current_group`,
+  `a_message_that_arrives_before_its_commit_is_kept_for_later` (decision
+  0019); `thrum-core`
+  `a_message_from_a_later_epoch_waits_for_the_commit_before_it`;
   `thrum-server` `commit_order::*` (one commit per epoch, decision 0018).
-  Gap: no test drops, duplicates or reorders frames, or restarts the
-  server between send and ack.
+  Gap: no test in this repository drops, duplicates or reorders frames on
+  the wire, or restarts the server between send and ack.
 - **Could break under**: a crash between storing and fan-out; an ack for a
   message the device never processed; reconnect during catch-up.
 
