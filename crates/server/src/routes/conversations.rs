@@ -2,7 +2,7 @@
 
 use axum::Json;
 use axum::body::Bytes;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -36,6 +36,11 @@ pub struct ConversationInfo {
     /// Username of the conversation admin (the creator).
     pub admin: String,
     pub members: Vec<String>,
+    /// The group's epoch as far as the server knows it: the one after the
+    /// last commit it took with `commit_epoch` (decision 0018), or `None`
+    /// before the first. A device whose group is behind it has missed
+    /// commits, for example because it was removed and added again.
+    pub epoch: Option<i64>,
 }
 
 /// `POST /v1/conversations`: create a conversation with the caller as its
@@ -122,12 +127,22 @@ pub async fn list(
     Ok(Json(out))
 }
 
+/// Query parameters of a send.
+#[derive(Debug, Default, Deserialize)]
+pub struct SendQuery {
+    /// Set when the payload is an MLS commit: the epoch it was built in.
+    pub commit_epoch: Option<u64>,
+}
+
 /// `POST /v1/conversations/{conversation_id}/messages`: store an opaque
-/// payload and deliver it to the other member devices.
+/// payload and deliver it to the other member devices. With
+/// `?commit_epoch=N` the payload is a commit for epoch N, taken only if no
+/// other commit took that epoch first (see [`messages::store_message`]).
 pub async fn send_message(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(conversation_id): Path<String>,
+    Query(query): Query<SendQuery>,
     body: Bytes,
 ) -> Result<impl IntoResponse, ApiError> {
     let authed = auth::authenticate(&state, &headers).await?;
@@ -158,6 +173,7 @@ pub async fn send_message(
         (authed.user_id, &authed.device_id),
         &body,
         state.cfg.queued_bytes_per_account,
+        query.commit_epoch,
     )
     .await?;
     // Opportunistically drop expired undelivered messages.
@@ -296,8 +312,8 @@ pub(crate) async fn conversation_info(
     state: &AppState,
     conversation_id: &str,
 ) -> Result<ConversationInfo, ApiError> {
-    let (name, owner_id) = sqlx::query_as::<_, (String, Option<i64>)>(
-        "SELECT name, owner_user_id FROM conversations WHERE id = $1",
+    let (name, owner_id, epoch) = sqlx::query_as::<_, (String, Option<i64>, Option<i64>)>(
+        "SELECT name, owner_user_id, commit_epoch FROM conversations WHERE id = $1",
     )
     .bind(conversation_id)
     .fetch_optional(&state.db)
@@ -320,6 +336,7 @@ pub(crate) async fn conversation_info(
         name,
         admin,
         members,
+        epoch,
     })
 }
 

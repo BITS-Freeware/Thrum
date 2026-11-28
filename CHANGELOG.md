@@ -8,6 +8,12 @@ All notable changes to Thrum are documented here. The format follows
 
 ### Added
 
+- `POST /v1/conversations/{id}/messages?commit_epoch=N` marks the payload
+  as a commit for epoch N (decision 0018). The server delivers a commit to
+  the sending device too. `DeviceCrypto::stage_add_members`,
+  `stage_remove_member`, `confirm_commit`, `discard_commit`,
+  `pending_commit` and `unsent_welcome` let a client hold a commit until
+  the server takes it.
 - `DeviceCrypto::group_epoch` returns a group's current MLS epoch, so
   tests can check that members have applied the same commits.
 - `thrum-server healthcheck` checks `/healthz` from inside the container;
@@ -48,6 +54,19 @@ All notable changes to Thrum are documented here. The format follows
 
 ### Fixed
 
+- Two devices that change a group in the same epoch no longer leave the
+  second one on its own copy of the group (#46, decision 0018). The CLI
+  sends a commit with the epoch it was built in, the server takes one
+  commit per epoch and refuses the other with `409 stale_epoch`, and the
+  CLI merges its own commit only once the server took it. A commit's
+  welcome goes out after that. A commit whose reply was lost is handed
+  back by the server and merged then, and a retry of it is answered with
+  its id instead of being queued twice.
+- A member who was removed and then added again joins the group again.
+  With the server removal first, the removed device kept its old group
+  and refused the new welcome. The conversation list now shows the epoch
+  the server knows, and a device whose group is behind it takes the
+  welcome.
 - The CLI removes a member on the server before it sends the MLS removal
   commit (#45). Other devices accept a removal only once the server no
   longer lists the device, so a commit sent first was refused everywhere

@@ -359,16 +359,9 @@ impl Chat {
             })
             .cloned()
             .collect();
+        self.settle_pending(conversation_id).await?;
         for target in targets {
-            let commit = self
-                .crypto
-                .remove_member(conversation_id, &target)
-                .map_err(|error| error.to_string())?;
-            self.persist()?;
-            let payload = encode_envelope(&Envelope::mls(&commit));
-            self.client
-                .send_message(&self.session.token, conversation_id, &payload)
-                .await?;
+            self.remove_identity(conversation_id, &target).await?;
         }
         Ok(())
     }
@@ -413,6 +406,7 @@ impl Chat {
         members: &[String],
         admit: &HashSet<String>,
     ) -> Result<SyncReport, String> {
+        self.settle_pending(conversation_id).await?;
         let roster = self.group_members(conversation_id)?;
         let trusted = self.store.lock().expect("store lock").trusted();
         let mut report = SyncReport::default();
@@ -536,41 +530,132 @@ impl Chat {
             report.push(conversation_id, "pending", identity);
         }
         if !packages.is_empty() {
-            let (commit, welcome) = self
+            // The welcome goes out only once the server took the commit, so
+            // nobody joins a group state that lost to another commit. If it
+            // lost, the next sync adds these devices again.
+            let pending = self
                 .crypto
-                .add_members(conversation_id, &packages)
+                .stage_add_members(conversation_id, &packages)
                 .map_err(|error| error.to_string())?;
-            self.persist()?;
-            self.pin_group_keys(conversation_id);
-            if let Some(welcome) = welcome {
-                let payload = encode_envelope(&Envelope::welcome(&welcome));
-                self.client
-                    .send_message(&self.session.token, conversation_id, &payload)
-                    .await?;
-            }
-            let payload = encode_envelope(&Envelope::mls(&commit));
-            self.client
-                .send_message(&self.session.token, conversation_id, &payload)
-                .await?;
-            for identity in added {
-                report.push(conversation_id, "added", &identity);
+            if self.send_staged(conversation_id, &pending).await? {
+                for identity in added {
+                    report.push(conversation_id, "added", &identity);
+                }
+            } else {
+                crate::errln!(
+                    "note: another change to the group came first; run sync again to add the new devices"
+                );
             }
         }
         Ok(report)
     }
 
-    /// Remove one device identity and send the commit. The group is merged
-    /// locally before the function returns.
+    /// Remove one device identity: stage the commit and send it. If another
+    /// device's commit took the epoch first, catch up and try once more
+    /// (the leaf may be gone by then); after that the next `sync` does it.
     async fn remove_identity(&self, conversation_id: &str, identity: &str) -> Result<(), String> {
-        let commit = self
-            .crypto
-            .remove_member(conversation_id, identity)
-            .map_err(|error| error.to_string())?;
+        for attempt in 0..2 {
+            if attempt > 0 {
+                self.catch_up().await?;
+                let still_there = self
+                    .group_members(conversation_id)?
+                    .iter()
+                    .any(|leaf| leaf == identity);
+                if !still_there {
+                    return Ok(());
+                }
+            }
+            let pending = self
+                .crypto
+                .stage_remove_member(conversation_id, identity)
+                .map_err(|error| error.to_string())?;
+            if self.send_staged(conversation_id, &pending).await? {
+                return Ok(());
+            }
+        }
+        Err(format!(
+            "another change to the group came first; run sync to remove {identity}"
+        ))
+    }
+
+    /// Send a staged commit and settle it: merged when the server takes it
+    /// (or took it before, for a retry), dropped when another commit took
+    /// its epoch first. True when taken. A request that keeps failing
+    /// leaves it pending: the server hands a commit it took back to this
+    /// device, which then merges it, and the next change resends it.
+    async fn send_staged(
+        &self,
+        conversation_id: &str,
+        pending: &thrum_core::mls::PendingCommit,
+    ) -> Result<bool, String> {
         self.persist()?;
-        let payload = encode_envelope(&Envelope::mls(&commit));
-        self.client
-            .send_message(&self.session.token, conversation_id, &payload)
-            .await?;
+        let payload = encode_envelope(&Envelope::mls(&pending.commit));
+        let mut last_error = String::new();
+        for _ in 0..3 {
+            match self
+                .client
+                .send_commit(
+                    &self.session.token,
+                    conversation_id,
+                    &payload,
+                    pending.epoch,
+                )
+                .await
+            {
+                Ok(Some(_)) => {
+                    self.crypto
+                        .confirm_commit(conversation_id)
+                        .map_err(|error| error.to_string())?;
+                    self.persist()?;
+                    self.pin_group_keys(conversation_id);
+                    self.send_unsent_welcome(conversation_id).await?;
+                    return Ok(true);
+                }
+                Ok(None) => {
+                    self.crypto
+                        .discard_commit(conversation_id)
+                        .map_err(|error| error.to_string())?;
+                    self.persist()?;
+                    return Ok(false);
+                }
+                Err(error) if error.starts_with("request failed") => last_error = error,
+                Err(error) => {
+                    // The server answered and refused it for good (not a
+                    // member any more, rate limit, ...): nobody else has it.
+                    self.crypto
+                        .discard_commit(conversation_id)
+                        .map_err(|error| error.to_string())?;
+                    self.persist()?;
+                    return Err(error);
+                }
+            }
+        }
+        Err(last_error)
+    }
+
+    /// Settle what an earlier change left behind: resend a commit still
+    /// pending, and send the welcome of a commit the server took.
+    async fn settle_pending(&self, conversation_id: &str) -> Result<(), String> {
+        if let Some(pending) = self
+            .crypto
+            .pending_commit(conversation_id)
+            .map_err(|error| error.to_string())?
+        {
+            self.send_staged(conversation_id, &pending).await?;
+        }
+        self.send_unsent_welcome(conversation_id).await
+    }
+
+    /// Send the welcome of a confirmed commit, if one is waiting.
+    async fn send_unsent_welcome(&self, conversation_id: &str) -> Result<(), String> {
+        if let Some(welcome) = self.crypto.unsent_welcome(conversation_id) {
+            let payload = encode_envelope(&Envelope::welcome(&welcome));
+            self.client
+                .send_message(&self.session.token, conversation_id, &payload)
+                .await?;
+            self.crypto.welcome_sent(conversation_id);
+            self.persist()?;
+        }
         Ok(())
     }
 
@@ -914,6 +999,21 @@ impl Chat {
         };
         match envelope {
             Envelope::Welcome { .. } => {
+                // A device that holds a group for this conversation asks
+                // which epoch the server knows: if its group is behind, it
+                // was removed and is being added again (decision 0018).
+                let server_epoch = if self
+                    .crypto
+                    .has_group(conversation_id)
+                    .map_err(|error| error.to_string())?
+                {
+                    self.client
+                        .conversation_epoch(&self.session.token, conversation_id)
+                        .await
+                        .map_err(|error| format!("welcome not applied yet: {error}"))?
+                } else {
+                    None
+                };
                 let mut outcome = Err(String::new());
                 for refresh in [false, true] {
                     let roster = self
@@ -922,7 +1022,7 @@ impl Chat {
                         .map_err(|error| format!("welcome not applied yet: {error}"))?;
                     outcome = self
                         .crypto
-                        .process_welcome(conversation_id, &data, &roster)
+                        .process_welcome_at(conversation_id, &data, &roster, server_epoch)
                         .map_err(|error| error.to_string());
                     if outcome.is_ok() {
                         break;

@@ -162,6 +162,27 @@ pub enum Incoming {
     Rejected(String),
 }
 
+/// A commit this device built and the server has not taken yet: the epoch
+/// it was built in, the serialized commit, and the welcome to send once the
+/// server takes it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingCommit {
+    pub epoch: u64,
+    pub commit: Vec<u8>,
+    pub welcome: Option<Vec<u8>>,
+}
+
+/// Where a conversation's pending commit bytes live in the key store, next
+/// to OpenMLS's own values, so they are saved and restored with them.
+fn pending_key(conversation_id: &str) -> Vec<u8> {
+    format!("thrum/pending-commit/{conversation_id}").into_bytes()
+}
+
+/// Where the welcome of a confirmed commit waits until it is sent.
+fn welcome_key(conversation_id: &str) -> Vec<u8> {
+    format!("thrum/unsent-welcome/{conversation_id}").into_bytes()
+}
+
 /// A device's MLS state: key store, signer and credential.
 pub struct DeviceCrypto {
     provider: OpenMlsRustCrypto,
@@ -527,6 +548,183 @@ impl DeviceCrypto {
         commit.tls_serialize_detached().map_err(other)
     }
 
+    /// Build an add commit like [`DeviceCrypto::add_members`], but leave it
+    /// pending: the group stays in its epoch until
+    /// [`DeviceCrypto::confirm_commit`] once the server took the commit, or
+    /// [`DeviceCrypto::discard_commit`] once it refused it. Send the welcome
+    /// only after the confirmation, so that nobody joins a group state the
+    /// server did not take. A pending commit from an earlier attempt is
+    /// dropped first.
+    pub fn stage_add_members(
+        &self,
+        conversation_id: &str,
+        key_packages: &[Vec<u8>],
+    ) -> Result<PendingCommit, MlsError> {
+        let packages: Vec<KeyPackage> = key_packages
+            .iter()
+            .map(|bytes| {
+                guard_panics(|| {
+                    KeyPackageIn::tls_deserialize_exact_bytes(bytes)
+                        .map_err(other)?
+                        .validate(self.provider.crypto(), ProtocolVersion::Mls10)
+                        .map_err(other)
+                })
+            })
+            .collect::<Result<_, _>>()?;
+        let mut group = self.group_mut(conversation_id)?;
+        group
+            .clear_pending_commit(self.provider.storage())
+            .map_err(other)?;
+        let epoch = group.epoch().as_u64();
+        let (commit, welcome, _) = group
+            .add_members(&self.provider, &self.signer, &packages)
+            .map_err(other)?;
+        let welcome = match welcome.body() {
+            MlsMessageBodyOut::Welcome(w) => Some(w.tls_serialize_detached().map_err(other)?),
+            _ => {
+                return Err(MlsError::Other(
+                    "add_members did not return a welcome".into(),
+                ));
+            }
+        };
+        let pending = PendingCommit {
+            epoch,
+            commit: commit.tls_serialize_detached().map_err(other)?,
+            welcome,
+        };
+        self.store_pending(conversation_id, Some(&pending))?;
+        Ok(pending)
+    }
+
+    /// Build a removal commit like [`DeviceCrypto::remove_member`], but
+    /// leave it pending (see [`DeviceCrypto::stage_add_members`]).
+    pub fn stage_remove_member(
+        &self,
+        conversation_id: &str,
+        identity: &str,
+    ) -> Result<PendingCommit, MlsError> {
+        let mut group = self.group_mut(conversation_id)?;
+        group
+            .clear_pending_commit(self.provider.storage())
+            .map_err(other)?;
+        let index = group
+            .members()
+            .find_map(|member| {
+                let leaf = leaf_of(&member.credential, &member.signature_key);
+                (leaf.identity == identity).then_some(member.index)
+            })
+            .ok_or(MlsError::UnknownMember)?;
+        let epoch = group.epoch().as_u64();
+        let (commit, _, _) = group
+            .remove_members(&self.provider, &self.signer, &[index])
+            .map_err(other)?;
+        let pending = PendingCommit {
+            epoch,
+            commit: commit.tls_serialize_detached().map_err(other)?,
+            welcome: None,
+        };
+        self.store_pending(conversation_id, Some(&pending))?;
+        Ok(pending)
+    }
+
+    /// The commit this device staged for a conversation and has neither
+    /// confirmed nor discarded, if the group still holds it.
+    pub fn pending_commit(&self, conversation_id: &str) -> Result<Option<PendingCommit>, MlsError> {
+        let Some(group) = self.group(conversation_id)? else {
+            return Ok(None);
+        };
+        if group.pending_commit().is_none() {
+            self.store_pending(conversation_id, None)?;
+            return Ok(None);
+        }
+        self.stored_pending(conversation_id)
+    }
+
+    /// The server took this device's pending commit: merge it. Its
+    /// welcome, if any, waits in [`DeviceCrypto::unsent_welcome`] until the
+    /// caller has sent it.
+    pub fn confirm_commit(&self, conversation_id: &str) -> Result<(), MlsError> {
+        let mut group = self.group_mut(conversation_id)?;
+        let welcome = self
+            .stored_pending(conversation_id)?
+            .and_then(|p| p.welcome);
+        group.merge_pending_commit(&self.provider).map_err(other)?;
+        self.store_pending(conversation_id, None)?;
+        self.store_welcome(conversation_id, welcome.as_deref());
+        Ok(())
+    }
+
+    /// The welcome of a confirmed commit that has not been sent yet.
+    pub fn unsent_welcome(&self, conversation_id: &str) -> Option<Vec<u8>> {
+        self.provider
+            .storage()
+            .values
+            .read()
+            .unwrap()
+            .get(&welcome_key(conversation_id))
+            .cloned()
+    }
+
+    /// The welcome from [`DeviceCrypto::unsent_welcome`] reached the server.
+    pub fn welcome_sent(&self, conversation_id: &str) {
+        self.store_welcome(conversation_id, None);
+    }
+
+    fn store_welcome(&self, conversation_id: &str, welcome: Option<&[u8]>) {
+        let key = welcome_key(conversation_id);
+        let mut values = self.provider.storage().values.write().unwrap();
+        match welcome {
+            Some(welcome) => {
+                values.insert(key, welcome.to_vec());
+            }
+            None => {
+                values.remove(&key);
+            }
+        }
+    }
+
+    fn stored_pending(&self, conversation_id: &str) -> Result<Option<PendingCommit>, MlsError> {
+        let stored = self
+            .provider
+            .storage()
+            .values
+            .read()
+            .unwrap()
+            .get(&pending_key(conversation_id))
+            .cloned();
+        stored
+            .map(|bytes| serde_json::from_slice(&bytes).map_err(other))
+            .transpose()
+    }
+
+    /// The server refused this device's pending commit (another commit
+    /// took the epoch first): drop it, and stay in the epoch.
+    pub fn discard_commit(&self, conversation_id: &str) -> Result<(), MlsError> {
+        let mut group = self.group_mut(conversation_id)?;
+        group
+            .clear_pending_commit(self.provider.storage())
+            .map_err(other)?;
+        self.store_pending(conversation_id, None)
+    }
+
+    fn store_pending(
+        &self,
+        conversation_id: &str,
+        pending: Option<&PendingCommit>,
+    ) -> Result<(), MlsError> {
+        let key = pending_key(conversation_id);
+        let mut values = self.provider.storage().values.write().unwrap();
+        match pending {
+            Some(pending) => {
+                values.insert(key, serde_json::to_vec(pending).map_err(other)?);
+            }
+            None => {
+                values.remove(&key);
+            }
+        }
+        Ok(())
+    }
+
     /// Encrypt an application payload for the conversation's group.
     pub fn encrypt(&self, conversation_id: &str, payload: &[u8]) -> Result<Vec<u8>, MlsError> {
         let mut group = self.group_mut(conversation_id)?;
@@ -574,6 +772,19 @@ impl DeviceCrypto {
             Some(group) => group,
             None => return Ok(Incoming::Ignored),
         };
+        // The server hands a commit back to its sender too. This device
+        // cannot decrypt its own message, so it knows its pending commit by
+        // its bytes: the server took it, so merge it. Its welcome waits to
+        // be sent.
+        if group.pending_commit().is_some()
+            && let Some(pending) = self.stored_pending(conversation_id)?
+            && pending.commit == message
+        {
+            group.merge_pending_commit(&self.provider).map_err(other)?;
+            self.store_pending(conversation_id, None)?;
+            self.store_welcome(conversation_id, pending.welcome.as_deref());
+            return Ok(Incoming::Commit);
+        }
         let message = guard_panics(|| {
             MlsMessageIn::tls_deserialize_exact_bytes(message)
                 .map_err(other)?
@@ -611,6 +822,9 @@ impl DeviceCrypto {
                 group
                     .merge_staged_commit(&self.provider, *staged_commit)
                     .map_err(other)?;
+                // Another commit took the epoch, and merging it dropped
+                // any commit of this device's that was still pending.
+                self.store_pending(conversation_id, None)?;
                 if removes_self || !group.is_active() {
                     group.delete(self.provider.storage()).map_err(other)?;
                 }
@@ -635,9 +849,27 @@ impl DeviceCrypto {
         welcome_bytes: &[u8],
         roster: &ServerRoster,
     ) -> Result<String, MlsError> {
+        self.process_welcome_at(conversation_id, welcome_bytes, roster, None)
+    }
+
+    /// [`DeviceCrypto::process_welcome`], told the group epoch the server
+    /// knows (decision 0018). A device whose own group is behind that epoch
+    /// has missed commits: it was removed (the server removal comes first,
+    /// so the removed device never gets the commit that removes it) and is
+    /// now being added again. Its old group is dropped and the welcome
+    /// joins the current one. A device that is up to date still refuses a
+    /// welcome for a group it is in.
+    pub fn process_welcome_at(
+        &self,
+        conversation_id: &str,
+        welcome_bytes: &[u8],
+        roster: &ServerRoster,
+        server_epoch: Option<u64>,
+    ) -> Result<String, MlsError> {
         let snapshot = self.snapshot();
-        let result =
-            guard_panics(|| self.process_welcome_inner(conversation_id, welcome_bytes, roster));
+        let result = guard_panics(|| {
+            self.process_welcome_inner(conversation_id, welcome_bytes, roster, server_epoch)
+        });
         if result.is_err() {
             self.restore(snapshot);
         }
@@ -649,6 +881,7 @@ impl DeviceCrypto {
         conversation_id: &str,
         welcome_bytes: &[u8],
         roster: &ServerRoster,
+        server_epoch: Option<u64>,
     ) -> Result<String, MlsError> {
         let welcome = Welcome::tls_deserialize_exact_bytes(welcome_bytes).map_err(other)?;
         let processed = ProcessedWelcome::new_from_welcome(&self.provider, &join_config(), welcome)
@@ -662,13 +895,15 @@ impl DeviceCrypto {
             )));
         }
         if let Some(mut existing) = self.group(conversation_id)? {
-            if existing.is_active() {
+            let behind = server_epoch.is_some_and(|epoch| existing.epoch().as_u64() < epoch);
+            if existing.is_active() && !behind {
                 return Err(MlsError::Other(
                     "this device is already in the conversation's group".into(),
                 ));
             }
-            // This device was removed earlier; drop the dead group so the
-            // new welcome can bring it back.
+            // This device was removed earlier, or is behind the server's
+            // epoch; drop the dead group so the new welcome can bring it
+            // back.
             existing.delete(self.provider.storage()).map_err(other)?;
         }
         let staged = processed
@@ -1005,6 +1240,110 @@ mod tests {
             carol.process_incoming(&conversation, &earlier, &roster),
             Ok(Incoming::Ignored) | Err(_)
         ));
+    }
+
+    #[test]
+    fn a_staged_commit_waits_until_the_server_hands_it_back() {
+        let alice = device("alice", 1);
+        let bob = device("bob", 1);
+        let carol = device("carol", 1);
+        let (_, conversation) = setup_two(&alice, &bob);
+        let conversation = String::from_utf8(conversation).unwrap();
+        let roster = roster_of(&[&alice, &bob, &carol]);
+        let before = alice.group_epoch(&conversation).unwrap();
+
+        let pending = alice
+            .stage_add_members(&conversation, &[carol.new_key_package().unwrap()])
+            .expect("stage");
+        assert_eq!(pending.epoch, before);
+        assert_eq!(
+            alice.group_epoch(&conversation).unwrap(),
+            before,
+            "not merged yet"
+        );
+        assert_eq!(
+            alice.pending_commit(&conversation).unwrap(),
+            Some(pending.clone())
+        );
+        assert_eq!(alice.unsent_welcome(&conversation), None);
+
+        // The server relays the commit to bob, and back to alice.
+        assert!(matches!(
+            bob.process_incoming(&conversation, &pending.commit, &roster),
+            Ok(Incoming::Commit)
+        ));
+        assert!(matches!(
+            alice.process_incoming(&conversation, &pending.commit, &roster),
+            Ok(Incoming::Commit)
+        ));
+        assert_eq!(alice.group_epoch(&conversation).unwrap(), before + 1);
+        assert_eq!(alice.pending_commit(&conversation).unwrap(), None);
+        let welcome = alice.unsent_welcome(&conversation).expect("welcome waits");
+        assert_eq!(Some(welcome.clone()), pending.welcome);
+        carol
+            .process_welcome(&conversation, &welcome, &roster)
+            .expect("carol joins the group alice and bob are in");
+        alice.welcome_sent(&conversation);
+        assert_eq!(alice.unsent_welcome(&conversation), None);
+        let hello = alice.encrypt(&conversation, b"hello").unwrap();
+        for reader in [&bob, &carol] {
+            assert!(matches!(
+                reader.process_incoming(&conversation, &hello, &roster),
+                Ok(Incoming::Application { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn a_staged_commit_that_loses_its_epoch_is_dropped() {
+        let alice = device("alice", 1);
+        let bob = device("bob", 1);
+        let carol = device("carol", 1);
+        let dee = device("dee", 1);
+        let (_, conversation) = setup_two(&alice, &bob);
+        let conversation = String::from_utf8(conversation).unwrap();
+        let roster = roster_of(&[&alice, &bob, &carol, &dee]);
+        let before = alice.group_epoch(&conversation).unwrap();
+
+        // Both commit in the same epoch; the server takes bob's.
+        let mine = alice
+            .stage_add_members(&conversation, &[carol.new_key_package().unwrap()])
+            .unwrap();
+        let theirs = bob
+            .stage_add_members(&conversation, &[dee.new_key_package().unwrap()])
+            .unwrap();
+        assert_eq!(mine.epoch, theirs.epoch);
+        bob.confirm_commit(&conversation).unwrap();
+        assert!(matches!(
+            alice.process_incoming(&conversation, &theirs.commit, &roster),
+            Ok(Incoming::Commit)
+        ));
+        assert_eq!(alice.group_epoch(&conversation).unwrap(), before + 1);
+        assert_eq!(
+            alice.pending_commit(&conversation).unwrap(),
+            None,
+            "mine is gone"
+        );
+        assert_eq!(
+            alice.unsent_welcome(&conversation),
+            None,
+            "and so is its welcome"
+        );
+        // Alice's own commit, relayed late, changes nothing.
+        assert!(matches!(
+            alice.process_incoming(&conversation, &mine.commit, &roster),
+            Ok(Incoming::Ignored)
+        ));
+        assert_eq!(alice.group_epoch(&conversation).unwrap(), before + 1);
+
+        // Discarding works too, and leaves the epoch alone.
+        let again = alice
+            .stage_add_members(&conversation, &[carol.new_key_package().unwrap()])
+            .unwrap();
+        assert_eq!(again.epoch, before + 1);
+        alice.discard_commit(&conversation).unwrap();
+        assert_eq!(alice.pending_commit(&conversation).unwrap(), None);
+        assert_eq!(alice.group_epoch(&conversation).unwrap(), before + 1);
     }
 
     #[test]
