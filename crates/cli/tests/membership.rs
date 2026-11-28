@@ -179,3 +179,67 @@ async fn a_welcome_from_another_conversation_cannot_take_over_a_group() {
         Ok(Incoming::Application { .. })
     ));
 }
+
+/// A removal the server refuses sends no commit. Before the server
+/// removal went first, a member who was not the admin could still send the
+/// removal commit and merge it; everyone else refused it, because the
+/// server still listed the device, and the member was left alone in a newer
+/// epoch, unable to read or be read.
+#[tokio::test]
+async fn a_removal_the_server_refuses_sends_no_commit() {
+    let server = Server::spawn().await;
+    let client = Client::new(server.base.clone());
+    let dir = tempfile::tempdir().expect("dir");
+    let (alice, _, _) = user(&client, dir.path(), "alice").await;
+    let (bob, _, _) = user(&client, dir.path(), "bob").await;
+    let (carol, _, _) = user(&client, dir.path(), "carol").await;
+    let conv = alice
+        .create_conversation(&["bob".into(), "carol".into()], "")
+        .await
+        .expect("create");
+    drain(&bob).await;
+    drain(&carol).await;
+
+    let refused = bob.remove_member(&conv, "carol").await;
+    assert!(refused.is_err(), "only the admin may remove: {refused:?}");
+    assert_eq!(bob.group_members(&conv).expect("bob's group").len(), 3);
+
+    let from_bob = bob.send_text(&conv, "still here").await.expect("send");
+    drain(&alice).await;
+    drain(&carol).await;
+    assert!(alice.find_message(&from_bob).is_some(), "alice reads bob");
+    assert!(carol.find_message(&from_bob).is_some(), "carol reads bob");
+    let from_alice = alice.send_text(&conv, "me too").await.expect("send");
+    drain(&bob).await;
+    assert!(bob.find_message(&from_alice).is_some(), "bob reads alice");
+}
+
+/// The admin's removal reaches the other members, and the removed member
+/// stops reading, now that the server removal goes first.
+#[tokio::test]
+async fn a_removal_reaches_the_other_members() {
+    let server = Server::spawn().await;
+    let client = Client::new(server.base.clone());
+    let dir = tempfile::tempdir().expect("dir");
+    let (alice, _, _) = user(&client, dir.path(), "alice").await;
+    let (bob, _, _) = user(&client, dir.path(), "bob").await;
+    let (carol, _, _) = user(&client, dir.path(), "carol").await;
+    let conv = alice
+        .create_conversation(&["bob".into(), "carol".into()], "")
+        .await
+        .expect("create");
+    drain(&bob).await;
+    drain(&carol).await;
+
+    alice.remove_member(&conv, "carol").await.expect("remove");
+    drain(&bob).await;
+    assert_eq!(bob.group_members(&conv).expect("bob's group").len(), 2);
+    let after = alice.send_text(&conv, "just us").await.expect("send");
+    drain(&bob).await;
+    drain(&carol).await;
+    assert!(bob.find_message(&after).is_some(), "bob reads alice");
+    assert!(
+        carol.find_message(&after).is_none(),
+        "carol no longer reads"
+    );
+}

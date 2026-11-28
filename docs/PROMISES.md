@@ -86,7 +86,9 @@ is withdrawn, the entry stays with the reason.
 
 - **Source**: docs/threat-model.md:98-100; decision 0006 choice 6.
 - **Checked by**: `thrum-core` `mls::tests::removed_member_cannot_read_later_messages`;
-  `thrum-cli` e2e `removed_member_stops_receiving_messages`.
+  `thrum-cli` e2e `removed_member_stops_receiving_messages`; `thrum-cli`
+  membership `a_removal_reaches_the_other_members`,
+  `a_removal_the_server_refuses_sends_no_commit`.
 - **Could break under**: the removing commit lost, delayed or reordered;
   two members committing at once; the server withholding the commit from
   some members; the removed member's client restoring old state.

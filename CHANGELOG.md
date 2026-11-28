@@ -48,6 +48,12 @@ All notable changes to Thrum are documented here. The format follows
 
 ### Fixed
 
+- The CLI removes a member on the server before it sends the MLS removal
+  commit (#45). Other devices accept a removal only once the server no
+  longer lists the device, so a commit sent first was refused everywhere
+  when the server removal then failed, for example a non-admin's attempt,
+  and left the remover alone in a newer epoch. The web client already
+  removed on the server first.
 - Deleting a conversation owner's account hands ownership to the member
   who joined first, as decision 0010 says. Join times are whole seconds,
   so two members who joined in the same second used to tie, and the older
