@@ -695,6 +695,12 @@ impl DeviceCrypto {
             .collect())
     }
 
+    /// The group's current epoch. Members that have applied the same
+    /// commits agree on it, so tests can check that devices converge.
+    pub fn group_epoch(&self, conversation_id: &str) -> Result<u64, MlsError> {
+        Ok(self.group_mut(conversation_id)?.epoch().as_u64())
+    }
+
     /// Every current leaf with its signature key.
     pub fn group_leaves(&self, conversation_id: &str) -> Result<Vec<Leaf>, MlsError> {
         let group = self.group_mut(conversation_id)?;
@@ -967,9 +973,12 @@ mod tests {
         let roster = roster_of(&[&alice, &bob, &carol]);
 
         // Carol joins after the earlier message was encrypted.
+        let before = alice.group_epoch(&conversation).expect("epoch");
+        assert_eq!(bob.group_epoch(&conversation).expect("epoch"), before);
         let (commit, welcome) = alice
             .add_members(&conversation, &[carol.new_key_package().expect("kp")])
             .expect("add carol");
+        assert_eq!(alice.group_epoch(&conversation).expect("epoch"), before + 1);
         // Bob applies the commit so the group stays in sync.
         assert!(matches!(
             bob.process_incoming(&conversation, &commit, &roster)
@@ -980,6 +989,16 @@ mod tests {
             .process_welcome(&conversation, &welcome.expect("welcome"), &roster)
             .expect("join");
         assert_eq!(joined, conversation);
+        for member in [&alice, &bob, &carol] {
+            assert_eq!(
+                member.group_epoch(&conversation).expect("epoch"),
+                before + 1
+            );
+        }
+        assert!(matches!(
+            alice.group_epoch("no such conversation"),
+            Err(MlsError::NoGroup)
+        ));
 
         // Even with the earlier ciphertext in hand, carol cannot read it.
         assert!(matches!(
